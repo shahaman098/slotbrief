@@ -141,6 +141,7 @@ Web app:
 - `screenshots/08-app-week-overview.png` — week overview with per-day utilisation and flags
 - `screenshots/09-app-week-day.png` — a single day in week mode
 - `screenshots/10-app-fixes-applied.png` — after Apply fixes: moved bookings marked, conflicts cleared
+- `screenshots/11-app-fit-someone-in.png` — Fit someone in: a 45-minute walk-in, options ranked by who has to move
 - `screenshots/06-app-landing.png` — landing screen (hero plus a product stage showing a real conflict and its fix)
 
 CLI / static boards:

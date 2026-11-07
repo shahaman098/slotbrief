@@ -443,7 +443,9 @@ def find_fit(
     free windows. The existing schedule is first fixed with ``resolve_day`` so the
     cost of an option is only what the new booking causes.
     """
-    base, _, _ = resolve_day(appts, hours, min_gap_min)
+    base, _, left = resolve_day(appts, hours, min_gap_min)
+    if left:  # the day is already overfull: nothing added to it can fit
+        return []
     open_dt, close_dt = hours
     span = timedelta(minutes=duration_min)
     pref = datetime.strptime(prefer, TIME_FMT) if prefer else None
@@ -1393,6 +1395,25 @@ def main(argv: list[str] | None = None) -> int:
         return webapp.serve(args.port, open_browser=not args.no_open)
     if args.csv is None:
         parser.error("a CSV path is required (or use --serve for the web app)")
+    if not args.csv.exists():
+        parser.error(f"file not found: {args.csv}")
+    if args.min_gap < 0:
+        parser.error("--min-gap can't be negative")
+    if args.day:
+        try:
+            datetime.strptime(args.day, DATE_FMT)
+        except ValueError:
+            parser.error(f"--day must look like 2026-11-07 (got {args.day!r})")
+    if args.fit is not None:
+        if args.week:
+            parser.error("--fit looks at a single day; drop --week")
+        if not 5 <= args.fit <= 480:
+            parser.error("--fit takes a length between 5 and 480 minutes")
+    if args.prefer:
+        try:
+            datetime.strptime(args.prefer, TIME_FMT)
+        except ValueError:
+            parser.error(f"--prefer must look like 14:00 (got {args.prefer!r})")
     day = args.day or datetime.now().strftime(DATE_FMT)
     if args.week:
         rows = load_week(args.csv)
@@ -1415,7 +1436,7 @@ def main(argv: list[str] | None = None) -> int:
     if not appts:
         print("No appointments found in CSV.", file=sys.stderr)
         return 1
-    if args.fit:
+    if args.fit is not None:
         print_fit(args.clinic, day, appts, args)
         return 0
     issues = analyse(appts, min_gap_min=args.min_gap)

@@ -724,6 +724,44 @@ class CliFixTests(unittest.TestCase):
             self.assertIn("No bookings needed to move.", (out / "reschedule-messages.txt").read_text())
 
 
+class CliValidationTests(unittest.TestCase):
+    """Bad flags and files get a one-line message, never a traceback."""
+
+    CSV = str(ROOT / "samples" / "demo-day.csv")
+
+    def _fail(self, *args):
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "slotbrief.py"), *args], capture_output=True, text=True
+        )
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        return proc.stderr
+
+    def test_each_bad_input_is_rejected_with_a_clear_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = ["--out", tmp]
+            for args, needle in (
+                (["no-such-file.csv"], "file not found"),
+                ([self.CSV, "--day", "tomorrow"], "--day must look like"),
+                ([self.CSV, "--min-gap", "-5"], "can't be negative"),
+                ([self.CSV, "--fit", "0"], "between 5 and 480"),
+                ([self.CSV, "--fit", "9999"], "between 5 and 480"),
+                ([self.CSV, "--fit", "30", "--prefer", "25:99"], "--prefer must look like"),
+                (["--week", str(ROOT / "samples" / "week"), "--fit", "30"], "single day"),
+            ):
+                self.assertIn(needle, self._fail(*args, *out), args)
+
+    def test_fit_on_an_overfull_day_returns_nothing_quickly(self) -> None:
+        import time
+
+        from slotbrief import find_fit, parse_hours
+
+        appts = [Appointment(f"{9 + i // 6:02d}:{(i % 6) * 10:02d}", 45, f"P{i}", "T", "+447400100001") for i in range(40)]
+        started = time.time()
+        self.assertEqual(find_fit(appts, parse_hours("09:00-18:00"), 30), [])
+        self.assertLess(time.time() - started, 2.0)
+
+
 class FitTests(unittest.TestCase):
     """The fit finder: where can one more booking go, and who has to budge?"""
 
