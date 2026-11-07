@@ -131,7 +131,7 @@ serialising the generated HTML/ICS/JSON files. Reproduce with
 python3 -m unittest discover -s tests -v
 ```
 
-60 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, the rescheduler and fit finder (each checked against brute force on random schedules), CLI round-trips for both modes, and the web app's API (including a live HTTP round-trip).
+61 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, the rescheduler and fit finder (each checked against brute force on random schedules), CLI round-trips for both modes, and the web app's API (including a live HTTP round-trip).
 
 ## Screenshots
 

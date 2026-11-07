@@ -51,8 +51,10 @@ class InputError(ValueError):
 
 
 def _read_files(files: list[dict[str, Any]], day: str) -> list[sb.Appointment]:
-    if not files:
+    if not isinstance(files, list) or not files:
         raise InputError("Add at least one CSV file.")
+    if not all(isinstance(entry, dict) for entry in files):
+        raise InputError("Each file needs a name and its CSV text.")
     rows: list[sb.Appointment] = []
     for entry in files:
         name = str(entry.get("name", "upload.csv"))
@@ -86,7 +88,7 @@ def analyse_payload(payload: dict[str, Any]) -> dict[str, Any]:
     except SystemExit as exc:
         raise InputError(str(exc.code)) from exc
 
-    rows = _read_files(list(payload.get("files") or []), day)
+    rows = _read_files(payload.get("files") or [], day)
     rows.sort(key=lambda a: (a.date, a.start))
     autofix = bool(payload.get("autofix"))
     days = []
@@ -180,7 +182,7 @@ def fit_payload(payload: dict[str, Any]) -> dict[str, Any]:
         raise InputError(str(exc.code)) from exc
     treatment = str(payload.get("treatment") or "Walk-in").strip()[:60] or "Walk-in"
     default_day = str(payload.get("day") or datetime.now().strftime(sb.DATE_FMT))
-    rows = _read_files(list(payload.get("files") or []), default_day)
+    rows = _read_files(payload.get("files") or [], default_day)
     rows.sort(key=lambda a: (a.date, a.start))
     groups = dict(sb.group_by_day(rows))
     label = str(payload.get("for_day") or next(iter(groups)))
@@ -313,6 +315,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, handler(payload))
         except (InputError, json.JSONDecodeError) as exc:
             self._json(400, {"error": str(exc)})
+        except (TypeError, AttributeError, KeyError, ValueError):
+            self._json(400, {"error": "That request wasn't in a shape SlotBrief understands."})
 
 
 def make_server(port: int = 8765, host: str = "127.0.0.1") -> ThreadingHTTPServer:

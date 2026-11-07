@@ -608,6 +608,14 @@ class LocalOnlyServerTests(unittest.TestCase):
         hdrs = {"Origin": "https://evil.example", "Content-Type": "application/json"}
         self.assertEqual(self._request("POST", "/api/analyse", hdrs, b"{}"), 403)
 
+    def test_malformed_payloads_are_input_errors_not_crashes(self) -> None:
+        import webapp
+
+        for files in ([1], "x", {"a": 1}, [None], []):
+            for fn in (webapp.analyse_payload, webapp.fit_payload):
+                with self.assertRaises(webapp.InputError, msg=repr(files)):
+                    fn({"files": files})
+
     def test_post_without_json_content_type_is_refused(self) -> None:
         self.assertEqual(self._request("POST", "/api/analyse", {"Content-Type": "text/plain"}, b"{}"), 415)
 
