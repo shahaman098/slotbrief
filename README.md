@@ -55,6 +55,20 @@ Detecting a clash is easy; fixing it without wrecking the day is the hard part. 
 
 In the web app, **Suggested fixes** shows the moves and the before/after conflict count; **Apply fixes** re-runs the analysis on the fixed schedule, rewrites the affected confirmations as "we need to move your appointment" messages, and lets you download the corrected schedule as a CSV. The sample day goes from 4 scheduling conflicts to 0 by moving 2 bookings. Things that moving can't fix (a bad phone number, a late start) stay flagged.
 
+## Fit someone in: the disruption-ranked slot finder
+
+A patient rings: "can you do a 45-minute Hydrafacial today?" Every booking tool answers with free slots. SlotBrief also answers the question the front desk actually has: *who would I have to move, and by how much?*
+
+`find_fit()` tries every 5-minute start in opening hours. For each one it **pins the new booking in place** and re-runs the same minimal-move solver, so whatever the new booking displaces is re-placed at the nearest free time. Every option is a complete conflict-free day. Options are ranked by (people moved, total minutes shifted, distance from the patient's preferred time), and starts that move nobody collapse into free windows ("any start 09:00–09:35 works").
+
+```bash
+python3 slotbrief.py samples/demo-day.csv --fit 45 --treatment Hydrafacial --prefer 14:00
+```
+
+In the web app it is the **Fit someone in** panel under the day timeline; each option that moves someone comes with the ready-to-copy "we need to move your appointment" text. The existing day is fixed first, so an option's cost is only what the *new* booking adds.
+
+How it is checked: the free windows equal a direct scan of every start on 60 random days; the number of bookings displaced equals the brute-force minimum (over every subset of the day) on 200 random days; and every option's whole day is re-verified conflict-free with the new booking never moved.
+
 ## CSV columns
 
 | Column | Required | Example |
@@ -106,7 +120,7 @@ serialising the generated HTML/ICS/JSON files. Reproduce with
 python3 -m unittest discover -s tests -v
 ```
 
-35 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, the rescheduler (including a brute-force optimality check on random schedules), CLI round-trips for both modes, and the web app's API (including a live HTTP round-trip).
+43 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, the rescheduler and fit finder (each checked against brute force on random schedules), CLI round-trips for both modes, and the web app's API (including a live HTTP round-trip).
 
 ## Screenshots
 
