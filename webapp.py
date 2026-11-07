@@ -15,6 +15,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import slotbrief as sb
 
@@ -22,6 +23,27 @@ ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
 SAMPLES_DIR = ROOT / "samples"
 MAX_BODY = 2 * 1024 * 1024
+
+
+LOCAL_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+
+
+def is_local_host(value: str) -> bool:
+    """True for 127.0.0.1 / localhost / [::1], with or without a port.
+
+    Checking the Host header stops DNS-rebinding pages from reaching the API.
+    """
+    try:
+        return (urlsplit("//" + value).hostname or "") in LOCAL_HOSTNAMES
+    except ValueError:
+        return False
+
+
+def is_local_origin(value: str) -> bool:
+    try:
+        return (urlsplit(value).hostname or "") in LOCAL_HOSTNAMES
+    except ValueError:
+        return False
 
 
 class InputError(ValueError):
@@ -241,7 +263,17 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, status: int, data: dict[str, Any]) -> None:
         self._send(status, json.dumps(data).encode("utf-8"), "application/json; charset=utf-8")
 
+    def _guard(self) -> bool:
+        """Local-only: refuse foreign Host headers and cross-site Origins."""
+        origin = self.headers.get("Origin")
+        if not is_local_host(self.headers.get("Host", "")) or (origin and not is_local_origin(origin)):
+            self._json(403, {"error": "SlotBrief only answers to localhost."})
+            return False
+        return True
+
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
+        if not self._guard():
+            return
         path, _, query = self.path.partition("?")
         if path in ("/", "/index.html"):
             self._send(200, (WEB_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
@@ -254,12 +286,23 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "Not found"})
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._guard():
+            return
         handlers = {"/api/analyse": analyse_payload, "/api/fit": fit_payload}
         handler = handlers.get(self.path)
         if handler is None:
             self._json(404, {"error": "Not found"})
             return
-        length = int(self.headers.get("Content-Length") or 0)
+        if "application/json" not in (self.headers.get("Content-Type") or "").lower():
+            self._json(415, {"error": "Send JSON (Content-Type: application/json)."})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if length < 0:
+            self._json(400, {"error": "Bad Content-Length."})
+            return
         if length > MAX_BODY:
             self._json(413, {"error": "That upload is too large (2 MB max)."})
             return

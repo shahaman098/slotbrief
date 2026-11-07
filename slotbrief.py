@@ -57,25 +57,60 @@ class Issue:
 
 
 def load_appointments(path: Path) -> list[Appointment]:
-    with path.open(newline="", encoding="utf-8") as fh:
-        return parse_appointments(fh)
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")  # Excel's "CSV UTF-8" starts with a BOM
+    except UnicodeDecodeError:
+        text = raw.decode("cp1252")  # older Excel on Windows
+    return parse_appointments(io.StringIO(text, newline=""))
+
+
+TIME_INPUTS = ("%H:%M", "%H.%M", "%I:%M%p", "%I:%M %p", "%I%p", "%I %p")
+MAX_DURATION_MIN = 720
+
+
+def _normalise_time(value: str, line: int) -> str:
+    """'9:30', '09.30' or '9:30 am' all become '09:30'."""
+    cleaned = " ".join(value.strip().upper().split())
+    for fmt in TIME_INPUTS:
+        try:
+            return datetime.strptime(cleaned, fmt).strftime(TIME_FMT)
+        except ValueError:
+            continue
+    raise SystemExit(f"Line {line}: time must look like 09:30 or 9:30am (got {value!r})")
+
+
+def _delimiter(text: str) -> str:
+    """Excel in much of Europe writes semicolon-separated 'CSV'."""
+    header = text.split("\n", 1)[0]
+    return max((",", ";", "\t"), key=header.count)
 
 
 def parse_appointments(fh: TextIO) -> list[Appointment]:
     """Parse appointment rows from any open CSV text stream."""
     rows: list[Appointment] = []
-    reader = csv.DictReader(fh)
+    text = fh.read().lstrip("\ufeff")
+    reader = csv.DictReader(io.StringIO(text, newline=""), delimiter=_delimiter(text))
+    # tolerate "Time", " phone" and other spreadsheet-isms in the header row
+    reader.fieldnames = [(name or "").strip().lower() for name in reader.fieldnames or []]
     required = {"time", "duration_min", "patient", "treatment", "phone"}
     if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
         missing = sorted(required - set(reader.fieldnames or []))
         raise SystemExit(f"CSV missing columns: {', '.join(missing)}")
     for i, row in enumerate(reader, start=2):
-        if not any((row.get(k) or "").strip() for k in reader.fieldnames):
+        if not any((v or "").strip() for v in row.values() if isinstance(v, str)):
             continue
         try:
             duration = int(str(row["duration_min"]).strip())
         except ValueError as exc:
             raise SystemExit(f"Line {i}: duration_min must be an integer") from exc
+        if not 1 <= duration <= MAX_DURATION_MIN:
+            raise SystemExit(
+                f"Line {i}: duration_min must be between 1 and {MAX_DURATION_MIN} (got {duration})"
+            )
+        patient = str(row["patient"] or "").strip()
+        if not patient:
+            raise SystemExit(f"Line {i}: patient is empty")
         date_value = str(row.get("date") or "").strip()
         if date_value:
             try:
@@ -84,11 +119,11 @@ def parse_appointments(fh: TextIO) -> list[Appointment]:
                 raise SystemExit(f"Line {i}: date must be YYYY-MM-DD") from exc
         rows.append(
             Appointment(
-                time=str(row["time"]).strip(),
+                time=_normalise_time(str(row["time"] or ""), i),
                 duration_min=duration,
-                patient=str(row["patient"]).strip(),
-                treatment=str(row["treatment"]).strip(),
-                phone=str(row["phone"]).strip(),
+                patient=patient,
+                treatment=str(row["treatment"] or "").strip(),
+                phone=str(row["phone"] or "").strip(),
                 notes=str(row.get("notes") or "").strip(),
                 date=date_value,
             )
@@ -155,6 +190,7 @@ def group_by_day(appts: list[Appointment]) -> list[tuple[str, list[Appointment]]
 
 
 def analyse(appts: list[Appointment], min_gap_min: int = 10) -> list[Issue]:
+    appts = sorted(appts, key=lambda a: a.start)  # callers need not pre-sort
     issues: list[Issue] = []
     for left, right in zip(appts, appts[1:]):
         if right.start < left.end:
@@ -1102,6 +1138,58 @@ def write_outputs(
     return {"board": board, "confirmations": confirmations, "calendar": calendar, "report": report}
 
 
+def write_fix_outputs(
+    out_dir: Path,
+    clinic: str,
+    groups: list[tuple[str, list[Appointment]]],
+    hours: tuple[datetime, datetime],
+    min_gap_min: int,
+) -> dict[str, object]:
+    """Apply the minimal-move rescheduler to every day and write what changed.
+
+    Writes fixed-schedule.csv (same columns as the input, so it re-imports) and
+    reschedule-messages.txt (one ready-to-send text per patient who moved).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / "fixed-schedule.csv"
+    msg_path = out_dir / "reschedule-messages.txt"
+    before = after = moved = 0
+    unplaced: list[tuple[str, Appointment]] = []
+    messages: list[str] = []
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(["date", "time", "duration_min", "patient", "treatment", "phone", "notes"])
+    for day, appts in groups:
+        fixed, moves, left = resolve_day(appts, hours, min_gap_min)
+        before += conflict_count(appts, min_gap_min)
+        after += conflict_count(fixed, min_gap_min)
+        moved += len(moves)
+        unplaced.extend((day, a) for a in left)
+        for a in fixed:
+            writer.writerow([day, a.time, a.duration_min, a.patient, a.treatment, a.phone, a.notes])
+            if a.moved_from and a.moved_from != a.time:
+                messages.append(reschedule_text(clinic, day, a))
+    csv_path.write_text(buf.getvalue(), encoding="utf-8")
+    msg_path.write_text(("\n\n".join(messages) + "\n") if messages else "No bookings needed to move.\n", encoding="utf-8")
+    return {
+        "csv": csv_path,
+        "messages": msg_path,
+        "before": before,
+        "after": after,
+        "moved": moved,
+        "unplaced": unplaced,
+    }
+
+
+def print_fix_summary(result: dict[str, object]) -> None:
+    print("  auto-fix (minimal moves):")
+    print(f"    - scheduling conflicts: {result['before']} -> {result['after']} by moving {result['moved']} booking(s)")
+    for day, a in result["unplaced"]:  # type: ignore[union-attr]
+        print(f"    - could not place {a.patient} ({day} {a.time}); call them")
+    print(f"    - fixed schedule: {result['csv']}")
+    print(f"    - reschedule texts: {result['messages']}")
+
+
 def write_week_outputs(
     out_dir: Path,
     clinic: str,
@@ -1274,6 +1362,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Open window used for utilisation %% in week mode (default 09:00-18:00)",
     )
     p.add_argument(
+        "--fix",
+        action="store_true",
+        help="Also run the minimal-move rescheduler: writes fixed-schedule.csv and reschedule-messages.txt",
+    )
+    p.add_argument(
         "--fit",
         type=int,
         metavar="MINUTES",
@@ -1313,6 +1406,10 @@ def main(argv: list[str] | None = None) -> int:
         ]
         paths = write_week_outputs(args.out, args.clinic, days, hours)
         print_week_summary(args.clinic, days, hours, paths)
+        if args.fix:
+            print_fix_summary(
+                write_fix_outputs(args.out, args.clinic, [(d, a) for d, a, _ in days], hours, args.min_gap)
+            )
         return 0
     appts = load_appointments(args.csv)
     if not appts:
@@ -1324,6 +1421,10 @@ def main(argv: list[str] | None = None) -> int:
     issues = analyse(appts, min_gap_min=args.min_gap)
     paths = write_outputs(args.out, args.clinic, day, appts, issues)
     print_summary(args.clinic, day, appts, issues, paths)
+    if args.fix:
+        print_fix_summary(
+            write_fix_outputs(args.out, args.clinic, [(day, appts)], parse_hours(args.hours), args.min_gap)
+        )
     return 0
 
 

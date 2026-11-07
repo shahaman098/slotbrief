@@ -23,7 +23,7 @@ Small clinics often live in a spreadsheet and a WhatsApp thread. Double-bookings
 python3 slotbrief.py --serve        # opens http://127.0.0.1:8765
 ```
 
-It binds to `127.0.0.1` only, so nothing you load leaves the machine. Try **Load sample day / week** on the start screen, or deep-link `http://127.0.0.1:8765/?sample=week&view=overview`.
+It binds to `127.0.0.1` only and rejects requests whose Host or Origin isn't localhost (so a web page can't reach it, including via DNS rebinding), so nothing you load leaves the machine. Try **Load sample day / week** on the start screen, or deep-link `http://127.0.0.1:8765/?sample=week&view=overview`.
 
 **Command line** — the same engine, writing files:
 
@@ -55,6 +55,15 @@ Detecting a clash is easy; fixing it without wrecking the day is the hard part. 
 
 In the web app, **Suggested fixes** shows the moves and the before/after conflict count; **Apply fixes** re-runs the analysis on the fixed schedule, rewrites the affected confirmations as "we need to move your appointment" messages, and lets you download the corrected schedule as a CSV. The sample day goes from 4 scheduling conflicts to 0 by moving 2 bookings. Things that moving can't fix (a bad phone number, a late start) stay flagged.
 
+From the terminal, `--fix` does the same and writes files you can use straight away:
+
+```bash
+python3 slotbrief.py samples/demo-all-flags.csv --out out --fix        # one day
+python3 slotbrief.py --week samples/week/ --out out/week --fix         # a whole week
+```
+
+`fixed-schedule.csv` has the same columns as the input (so it re-imports), and `reschedule-messages.txt` has one ready-to-send text per patient who moved. Both modes print the before/after conflict count and name any booking that could not be placed.
+
 ## Fit someone in: the disruption-ranked slot finder
 
 A patient rings: "can you do a 45-minute Hydrafacial today?" Every booking tool answers with free slots. SlotBrief also answers the question the front desk actually has: *who would I have to move, and by how much?*
@@ -80,6 +89,8 @@ How it is checked: the free windows equal a direct scan of every start on 60 ran
 | `phone` | yes | `+4474…` |
 | `notes` | no | `First visit` |
 | `date` | for `--week` on a single CSV | `2026-11-03` |
+
+Real spreadsheet exports work as they come: Excel's "CSV UTF-8" (BOM) and older Windows-1252 files, semicolon-separated files, headers in any case, and times written `9:30`, `09.30` or `9:30 am`. Bad values (a time like "noon", a negative duration, an empty patient) stop with a line-numbered message, never a traceback.
 
 For `--week`, pass either one CSV with a `date` column or a directory of files named `YYYY-MM-DD.csv` — which is exactly what `samples/week/` is. Single-day runs ignore `date`, so existing CSVs keep working unchanged.
 
@@ -120,7 +131,7 @@ serialising the generated HTML/ICS/JSON files. Reproduce with
 python3 -m unittest discover -s tests -v
 ```
 
-43 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, the rescheduler and fit finder (each checked against brute force on random schedules), CLI round-trips for both modes, and the web app's API (including a live HTTP round-trip).
+58 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, the rescheduler and fit finder (each checked against brute force on random schedules), CLI round-trips for both modes, and the web app's API (including a live HTTP round-trip).
 
 ## Screenshots
 

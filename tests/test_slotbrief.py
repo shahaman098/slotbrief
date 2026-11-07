@@ -458,11 +458,16 @@ class WebAppTests(unittest.TestCase):
             self.assertIn("SlotBrief", page)
             sample = json.loads(urllib.request.urlopen(base + "/api/sample?kind=day").read())
             req = urllib.request.Request(
-                base + "/api/analyse", data=json.dumps(sample).encode(), method="POST"
+                base + "/api/analyse",
+                data=json.dumps(sample).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
             )
             result = json.loads(urllib.request.urlopen(req).read())
             self.assertEqual(result["totals"]["flags"], 6)
-            bad = urllib.request.Request(base + "/api/analyse", data=b"{}", method="POST")
+            bad = urllib.request.Request(
+                base + "/api/analyse", data=b"{}", method="POST", headers={"Content-Type": "application/json"}
+            )
             with self.assertRaises(urllib.error.HTTPError) as ctx:
                 urllib.request.urlopen(bad)
             self.assertEqual(ctx.exception.code, 400)
@@ -565,6 +570,158 @@ class ResolveTests(unittest.TestCase):
         fixed, moves, unplaced = resolve_day(appts, parse_hours("09:00-10:00"), 10)
         self.assertTrue(unplaced)
         self.assertEqual(len(fixed), 3)
+
+
+class LocalOnlyServerTests(unittest.TestCase):
+    """The server only answers to localhost, so a web page can't reach patient data."""
+
+    def _request(self, method, path, headers=None, body=b""):
+        import http.client
+        import threading
+
+        import webapp
+
+        server = webapp.make_server(port=0)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+            conn.putrequest(method, path, skip_host=True)
+            hdrs = {"Host": f"127.0.0.1:{server.server_address[1]}", **(headers or {})}
+            for key, value in hdrs.items():
+                conn.putheader(key, value)
+            conn.putheader("Content-Length", str(len(body)))
+            conn.endheaders(body)
+            resp = conn.getresponse()
+            return resp.status
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_foreign_host_header_is_refused(self) -> None:
+        self.assertEqual(self._request("GET", "/api/sample?kind=day", {"Host": "evil.example:8765"}), 403)
+
+    def test_localhost_and_ipv4_hosts_are_accepted(self) -> None:
+        self.assertEqual(self._request("GET", "/healthz", {"Host": "localhost:8765"}), 200)
+        self.assertEqual(self._request("GET", "/healthz"), 200)
+
+    def test_cross_site_origin_is_refused(self) -> None:
+        hdrs = {"Origin": "https://evil.example", "Content-Type": "application/json"}
+        self.assertEqual(self._request("POST", "/api/analyse", hdrs, b"{}"), 403)
+
+    def test_post_without_json_content_type_is_refused(self) -> None:
+        self.assertEqual(self._request("POST", "/api/analyse", {"Content-Type": "text/plain"}, b"{}"), 415)
+
+    def test_host_helper_handles_ports_and_ipv6(self) -> None:
+        import webapp
+
+        for ok in ("127.0.0.1", "127.0.0.1:8765", "localhost:1", "[::1]:8765"):
+            self.assertTrue(webapp.is_local_host(ok), ok)
+        for bad in ("", "evil.example", "127.0.0.1.evil.example:80", "10.0.0.5:8765"):
+            self.assertFalse(webapp.is_local_host(bad), bad)
+
+
+class CsvRobustnessTests(unittest.TestCase):
+    """Real spreadsheet exports, not just tidy CSVs."""
+
+    HEAD = "time,duration_min,patient,treatment,phone\n"
+
+    @staticmethod
+    def _parse(text):
+        import io
+
+        from slotbrief import parse_appointments
+
+        return parse_appointments(io.StringIO(text))
+
+    def test_excel_bom_does_not_hide_the_first_column(self) -> None:
+        rows = self._parse("\ufeff" + self.HEAD + "09:00,30,A,B,+447400100001\n")
+        self.assertEqual(rows[0].time, "09:00")
+
+    def test_bom_file_on_disk_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "x.csv"
+            path.write_bytes(b"\xef\xbb\xbf" + (self.HEAD + "09:00,30,A,B,+447400100001\n").encode())
+            self.assertEqual(len(load_appointments(path)), 1)
+
+    def test_cp1252_file_with_accents_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "x.csv"
+            path.write_bytes((self.HEAD + "09:00,30,Zo\xeb,B,+447400100001\n").encode("cp1252"))
+            self.assertEqual(load_appointments(path)[0].patient, "Zo\xeb")
+
+    def test_semicolon_separated_csv_and_messy_headers(self) -> None:
+        rows = self._parse("Time; Duration_Min ;Patient;Treatment;PHONE\n09:00;30;A;B;+447400100001\n")
+        self.assertEqual((rows[0].time, rows[0].duration_min), ("09:00", 30))
+
+    def test_times_are_normalised(self) -> None:
+        rows = self._parse(
+            self.HEAD + "9:30,30,A,B,+447400100001\n2:15 pm,30,C,B,+447400100001\n09.45,30,D,B,+447400100001\n12:05 AM,30,E,B,+447400100001\n"
+        )
+        self.assertEqual(sorted(a.time for a in rows), ["00:05", "09:30", "09:45", "14:15"])
+
+    def test_bad_values_give_a_line_numbered_message_not_a_traceback(self) -> None:
+        for body, needle in (
+            ("noon,30,A,B,+447400100001\n", "Line 2: time must look like"),
+            ("09:00,0,A,B,+447400100001\n", "between 1 and 720"),
+            ("09:00,-5,A,B,+447400100001\n", "between 1 and 720"),
+            ("09:00,9999,A,B,+447400100001\n", "between 1 and 720"),
+            ("09:00,thirty,A,B,+447400100001\n", "must be an integer"),
+            ("09:00,30,,B,+447400100001\n", "patient is empty"),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                self._parse(self.HEAD + body)
+            self.assertIn(needle, str(ctx.exception.code))
+
+    def test_analyse_does_not_depend_on_input_order(self) -> None:
+        a = Appointment("09:00", 60, "A", "T", "+447400100001")
+        b = Appointment("09:30", 30, "B", "T", "+447400100002")
+        c = Appointment("14:00", 30, "C", "T", "+447400100003")
+        forward = [(i.kind, i.message) for i in analyse([a, b, c])]
+        shuffled = [(i.kind, i.message) for i in analyse([c, b, a])]
+        self.assertEqual(forward, shuffled)
+        self.assertEqual([k for k, _ in forward].count("overlap"), 1)
+
+
+class CliFixTests(unittest.TestCase):
+    """--fix: the rescheduler from the terminal, with files you can re-import."""
+
+    def _run(self, *args):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "slotbrief.py"), *args], capture_output=True, text=True, check=True
+        )
+
+    def test_day_fix_writes_a_conflict_free_reimportable_schedule(self) -> None:
+        from slotbrief import conflict_count
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            proc = self._run(str(ROOT / "samples" / "demo-all-flags.csv"), "--out", str(out), "--fix")
+            self.assertIn("scheduling conflicts: 4 -> 0 by moving 2 booking(s)", proc.stdout)
+            fixed = load_appointments(out / "fixed-schedule.csv")
+            self.assertEqual(len(fixed), 6)
+            self.assertEqual(conflict_count(fixed), 0)
+            texts = (out / "reschedule-messages.txt").read_text(encoding="utf-8")
+            self.assertEqual(texts.count("We need to move your"), 2)
+
+    def test_week_fix_keeps_days_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            proc = self._run("--week", str(ROOT / "samples" / "week"), "--out", str(out), "--fix")
+            self.assertIn("-> 0 by moving", proc.stdout)
+            rows = load_week(out / "fixed-schedule.csv")
+            self.assertEqual(len({a.date for a in rows}), 5)
+
+    def test_fix_on_a_clean_day_moves_nobody(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "clean.csv"
+            src.write_text(
+                "time,duration_min,patient,treatment,phone\n09:00,30,A,B,+447400100001\n11:00,30,C,B,+447400100002\n",
+                encoding="utf-8",
+            )
+            out = Path(tmp) / "out"
+            proc = self._run(str(src), "--out", str(out), "--fix")
+            self.assertIn("0 -> 0 by moving 0 booking(s)", proc.stdout)
+            self.assertIn("No bookings needed to move.", (out / "reschedule-messages.txt").read_text())
 
 
 class FitTests(unittest.TestCase):
