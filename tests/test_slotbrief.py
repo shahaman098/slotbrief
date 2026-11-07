@@ -410,6 +410,27 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(result["totals"]["busiest_day"], "2026-11-06")
         self.assertEqual([d["day"] for d in result["days"]][0], "2026-11-02")
 
+    def test_autofix_payload_clears_conflicts_and_rewrites_messages(self) -> None:
+        import webapp
+
+        payload = webapp.sample_payload("day")
+        before = webapp.analyse_payload(payload)
+        self.assertFalse(before["autofix"])
+        fix = before["days"][0]["fix"]
+        self.assertEqual((fix["conflicts_before"], fix["conflicts_after"]), (4, 0))
+        self.assertEqual(len(fix["moves"]), 2)
+
+        after = webapp.analyse_payload({**payload, "autofix": True})
+        day = after["days"][0]
+        self.assertTrue(after["autofix"])
+        self.assertEqual(len(day["appointments"]), 6)
+        self.assertLess(day["stats"]["flags"], before["days"][0]["stats"]["flags"])
+        moved = [a for a in day["appointments"] if a["moved_from"]]
+        self.assertEqual(len(moved), 2)
+        self.assertIn("move your", moved[0]["confirmation"])
+        self.assertEqual(after["csv"].splitlines()[0], "date,time,duration_min,patient,treatment,phone,notes")
+        self.assertEqual(len(after["csv"].strip().splitlines()), 7)
+
     def test_bad_input_raises_input_error_not_a_crash(self) -> None:
         import webapp
 
@@ -448,6 +469,102 @@ class WebAppTests(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+
+class ResolveTests(unittest.TestCase):
+    """The rescheduler: optimal keep-set, nearest-slot placement, safety."""
+
+    HOURS = ("09:00", "18:00")
+
+    @staticmethod
+    def _hours():
+        from slotbrief import parse_hours
+
+        return parse_hours("09:00-18:00")
+
+    @staticmethod
+    def _appt(time, dur, name="P"):
+        return Appointment(time, dur, name, "Treatment", "+447400100001")
+
+    def test_sample_day_goes_from_conflicts_to_none_with_two_moves(self) -> None:
+        from slotbrief import conflict_count, resolve_day
+
+        appts = load_appointments(ROOT / "samples" / "demo-all-flags.csv")
+        fixed, moves, unplaced = resolve_day(appts, self._hours(), 10)
+        self.assertEqual(conflict_count(appts), 4)
+        self.assertEqual(conflict_count(fixed), 0)
+        self.assertEqual(len(moves), 2)
+        self.assertEqual(unplaced, [])
+        self.assertEqual(len(fixed), len(appts))
+        self.assertTrue(all(a.moved_from for a in fixed if a.time != a.moved_from and a.moved_from))
+
+    def test_clean_schedule_is_left_alone(self) -> None:
+        from slotbrief import resolve_day
+
+        appts = [self._appt("09:00", 30, "A"), self._appt("10:00", 30, "B"), self._appt("12:00", 60, "C")]
+        fixed, moves, unplaced = resolve_day(appts, self._hours(), 10)
+        self.assertEqual(moves, [])
+        self.assertEqual([a.time for a in fixed], ["09:00", "10:00", "12:00"])
+
+    def test_keep_set_matches_brute_force_optimum_on_random_days(self) -> None:
+        import itertools
+        import random
+
+        from slotbrief import _keep_set
+
+        rng = random.Random(7)
+        for _ in range(250):
+            n = rng.randint(1, 8)
+            gap = rng.choice([0, 5, 10, 15])
+            appts = [
+                self._appt(f"{9 + rng.randint(0, 6):02d}:{rng.choice(['00', '15', '30', '45'])}", rng.choice([20, 30, 45, 60, 90]), f"P{i}")
+                for i in range(n)
+            ]
+
+            def compatible(group):
+                ordered = sorted(group, key=lambda a: a.start)
+                return all(
+                    (b.start - a.end).total_seconds() / 60 >= gap for a, b in zip(ordered, ordered[1:])
+                )
+
+            best = max(
+                len(c)
+                for r in range(n + 1)
+                for c in itertools.combinations(appts, r)
+                if compatible(c)
+            )
+            kept = _keep_set(appts, gap)
+            self.assertEqual(len(kept), best, (gap, [(a.time, a.duration_min) for a in appts]))
+            self.assertTrue(compatible([appts[i] for i in kept]))
+
+    def test_fixed_schedules_are_conflict_free_and_inside_opening_hours(self) -> None:
+        import random
+
+        from slotbrief import conflict_count, resolve_day
+
+        rng = random.Random(11)
+        hours = self._hours()
+        for _ in range(150):
+            appts = [
+                self._appt(f"{9 + rng.randint(0, 7):02d}:{rng.choice(['00', '20', '40'])}", rng.choice([30, 45, 60]), f"P{i}")
+                for i in range(rng.randint(2, 9))
+            ]
+            fixed, moves, unplaced = resolve_day(appts, hours, 10)
+            self.assertEqual(len(fixed), len(appts))
+            if not unplaced:
+                self.assertEqual(conflict_count(fixed), 0)
+            for a in fixed:
+                if a.moved_from:
+                    self.assertGreaterEqual(a.start, hours[0])
+                    self.assertLessEqual(a.end, hours[1])
+
+    def test_overfull_day_reports_unplaceable_bookings(self) -> None:
+        from slotbrief import parse_hours, resolve_day
+
+        appts = [self._appt("09:00", 30, "A"), self._appt("09:10", 30, "B"), self._appt("09:20", 30, "C")]
+        fixed, moves, unplaced = resolve_day(appts, parse_hours("09:00-10:00"), 10)
+        self.assertTrue(unplaced)
+        self.assertEqual(len(fixed), 3)
 
 
 if __name__ == "__main__":

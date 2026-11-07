@@ -46,6 +46,15 @@ Open `out/today-board.html` in a browser. Read `out/confirmations.txt`. Double-c
 
 Week mode writes `week-board.html`, `week.ics`, confirmations grouped per day, and a `report.json` with a block per day plus weekly totals.
 
+## Auto-fix: the minimal-move rescheduler
+
+Detecting a clash is easy; fixing it without wrecking the day is the hard part. `resolve_day()` does it in two steps:
+
+1. **Keep the most bookings that already coexist.** Conflicts (overlaps, turnarounds under the minimum gap, a patient booked twice) are modelled as a weighted interval-scheduling problem. Sorting by end time and binary-searching (`bisect`) the latest compatible predecessor gives the optimal keep-set in O(n log n). The unit tests check it against a brute-force search of every subset on 250 random days.
+2. **Re-place only the displaced bookings** at the free start time (5-minute grid, inside opening hours, respecting the gap to every neighbour) closest to where each one was. If nothing fits, the booking is reported as unplaceable rather than silently dropped.
+
+In the web app, **Suggested fixes** shows the moves and the before/after conflict count; **Apply fixes** re-runs the analysis on the fixed schedule, rewrites the affected confirmations as "we need to move your appointment" messages, and lets you download the corrected schedule as a CSV. The sample day goes from 4 scheduling conflicts to 0 by moving 2 bookings. Things that moving can't fix (a bad phone number, a late start) stay flagged.
+
 ## CSV columns
 
 | Column | Required | Example |
@@ -80,7 +89,7 @@ Rows are grouped by date *before* analysis, so `analyse()` runs once per day: Fr
 python3 -m unittest discover -s tests -v
 ```
 
-29 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, CLI round-trips for both modes, and the web app's API (including a live HTTP round-trip).
+35 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, the rescheduler (including a brute-force optimality check on random schedules), CLI round-trips for both modes, and the web app's API (including a live HTTP round-trip).
 
 ## Screenshots
 
@@ -89,6 +98,7 @@ Web app:
 - `screenshots/07-app-day-view.png` — day view: KPIs, chair timeline with conflicts highlighted, schedule, needs-attention list
 - `screenshots/08-app-week-overview.png` — week overview with per-day utilisation and flags
 - `screenshots/09-app-week-day.png` — a single day in week mode
+- `screenshots/10-app-fixes-applied.png` — after Apply fixes: moved bookings marked, conflicts cleared
 - `screenshots/06-app-landing.png` — landing screen (the hero is the product drawn as line-art: a timeline with one collision)
 
 CLI / static boards:

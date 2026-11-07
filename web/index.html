@@ -164,6 +164,21 @@ tr.row.hl { background: rgba(255,255,255,.07); }
 .allclear { font: 300 28px/1.2 var(--serif); padding: 26px 0; border-top: 1px solid var(--line-2); border-bottom: 1px solid var(--line); color: var(--fg); }
 .allclear small { display: block; font: 400 14px var(--sans); color: var(--fg-3); margin-top: 8px; }
 
+/* fixes */
+.fixes { border-top: 1px solid var(--line-2); }
+.fixrow { display: grid; grid-template-columns: minmax(160px, 1.1fr) 1fr auto; gap: 20px; align-items: baseline; padding: 18px 0; border-bottom: 1px solid var(--line); }
+.fixrow .who { font: 400 19px/1.2 var(--serif); }
+.fixrow .tr { display: block; color: var(--fg-3); font-size: 13px; margin-top: 3px; }
+.fixrow .mv { font-variant-numeric: tabular-nums; color: var(--fg-2); }
+.fixrow .mv b { color: var(--fg); font-weight: 500; }
+.fixrow .shift { color: var(--fg-3); font-size: 13px; text-align: right; white-space: nowrap; }
+.fixbar { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; margin-top: 26px; }
+.fixbar p { margin: 0; color: var(--fg-2); max-width: 46ch; }
+.applied { color: var(--fg-2); }
+.bar.moved { border-style: dashed; }
+.mvd { color: var(--fg-2); }
+@media (max-width: 720px) { .fixrow { grid-template-columns: 1fr; gap: 4px; } .fixrow .shift { text-align: left; } }
+
 /* overview */
 .ov { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); border-top: 1px solid var(--line); }
 .ovc { text-align: left; padding: 26px 24px 30px 0; border-bottom: 1px solid var(--line); }
@@ -221,7 +236,7 @@ const ARROW = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" strok
 const MARK = '<svg width="22" height="20" viewBox="0 0 22 20" fill="currentColor"><rect x="0" y="0" width="14" height="5" rx="1.5"/><rect x="5" y="7.5" width="17" height="5" rx="1.5"/><rect x="0" y="15" width="11" height="5" rx="1.5"/></svg>';
 const pill = (label, onclick, cls = "") => h("button", { class: "pillbtn " + cls, onclick }, label, h("span", { class: "go", html: ARROW }));
 
-const S = { files: [], opts: { clinic: "Indie Clinic", hours: "09:00-18:00", min_gap: 10 }, result: null, view: "0", error: "" };
+const S = { files: [], opts: { clinic: "Indie Clinic", hours: "09:00-18:00", min_gap: 10 }, result: null, view: "0", error: "", autofix: false };
 
 function toast(msg) {
   const t = $("#toast"); t.textContent = msg; t.classList.add("show");
@@ -240,7 +255,7 @@ function download(name, text, type) {
 async function analyse() {
   S.error = "";
   try {
-    const res = await fetch("/api/analyse", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ files: S.files, ...S.opts }) });
+    const res = await fetch("/api/analyse", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ files: S.files, ...S.opts, autofix: S.autofix }) });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Something went wrong.");
     S.result = data;
@@ -251,12 +266,12 @@ async function analyse() {
 async function loadFiles(list) {
   const files = [];
   for (const f of list) files.push({ name: f.name, text: await f.text() });
-  S.files = files; S.result = null; await analyse();
+  S.files = files; S.result = null; S.autofix = false; await analyse();
   if (S.result) { S.view = S.result.mode === "week" ? "overview" : "0"; render(); window.scrollTo(0, 0); }
 }
-async function loadSample(kind) {
+async function loadSample(kind, opts = {}) {
   const p = await (await fetch("/api/sample?kind=" + kind)).json();
-  S.files = p.files; S.opts.clinic = p.clinic; S.result = null; await analyse();
+  S.files = p.files; S.opts.clinic = p.clinic; S.result = null; S.autofix = !!opts.autofix; await analyse();
   if (S.result) { S.view = S.result.mode === "week" ? "overview" : "0"; render(); window.scrollTo(0, 0); }
 }
 
@@ -270,13 +285,14 @@ function nav() {
       mi("Download calendar (.ics)", () => download(r.mode === "week" ? "slotbrief-week.ics" : `slotbrief-${r.days[0].day}.ics`, r.ics, "text/calendar")),
       mi("Copy all confirmation texts", () => copyText(r.days.flatMap(d => d.appointments.map(a => a.confirmation)).join("\n\n"), "All confirmations copied")),
       mi("Download report (.json)", () => { const { ics, ...rest } = r; download("slotbrief-report.json", JSON.stringify(rest, null, 2), "application/json"); }),
+      mi(r.autofix ? "Download fixed schedule (.csv)" : "Download schedule (.csv)", () => download("slotbrief-schedule.csv", r.csv, "text/csv")),
       mi("Print this view", () => window.print()));
     function mi(label, fn) { return h("button", { role: "menuitem", onclick: () => { list.classList.remove("open"); fn(); } }, label); }
     left.append(h("button", { class: "tl-link", "aria-haspopup": "menu", onclick: e => { e.stopPropagation(); list.classList.toggle("open"); } }, "Export"), list);
   } else left.append(h("button", { class: "tl-link", onclick: () => $("#picker").click() }, "Choose file"));
   const mid = h("div", { class: "wordmark", "aria-label": "SlotBrief" }, h("span", { html: MARK }), h("span", { class: "t" }, "SLOTBRIEF"));
   const right = h("div", { class: "r" },
-    r ? h("button", { class: "tl-link", onclick: () => { S.result = null; S.files = []; S.error = ""; render(); window.scrollTo(0, 0); } }, "New file")
+    r ? h("button", { class: "tl-link", onclick: () => { S.result = null; S.files = []; S.error = ""; S.autofix = false; render(); window.scrollTo(0, 0); } }, "New file")
       : h("button", { class: "tl-link hide-m", onclick: () => loadSample("week") }, "Sample week"),
     r ? null : pill("Try a sample day", () => loadSample("day"), "sm"));
   n.append(left, mid, right);
@@ -377,11 +393,11 @@ function timeline(d, r) {
   const el = h("div", { class: "tl", style: `height:${laneEnd.length * 54}px` }, h("div", { class: "openwin", style: `left:${pct(open)};width:${((close - open) / total * 100).toFixed(3)}%` }));
   for (let m = lo; m <= hi; m += 60) el.append(h("i", { class: "tick", style: `left:${pct(m)}` }, h("span", { class: "num" }, String(m / 60).padStart(2, "0"))));
   placed.forEach(({ a, i, lane }) => el.append(h("button", {
-    class: "bar " + a.status, "data-i": i, style: `left:${pct(mins(a.time))};width:${(a.duration_min / total * 100).toFixed(3)}%;top:${lane * 54}px`,
+    class: "bar " + a.status + (a.moved_from ? " moved" : ""), "data-i": i, style: `left:${pct(mins(a.time))};width:${(a.duration_min / total * 100).toFixed(3)}%;top:${lane * 54}px`,
     title: `${a.patient} · ${a.treatment} · ${a.time}–${a.end}`,
     "aria-label": `${a.patient}, ${a.treatment}, ${a.time} to ${a.end}, ${a.status === "ok" ? "no issues" : a.status === "warn" ? "worth a look" : "time conflict"}`,
     onclick: () => focusRow(i),
-  }, h("b", {}, a.patient), h("small", { class: "num" }, a.time + "–" + a.end))));
+  }, h("b", {}, a.patient), h("small", { class: "num" }, a.moved_from ? `moved from ${a.moved_from}` : a.time + "–" + a.end))));
   const lg = (c, t) => h("span", {}, h("i", { style: `border-color:${c}` }), t);
   return h("div", { class: "sec" },
     h("div", { class: "sec-h" }, h("h2", {}, "Chair timeline"), h("span", { class: "sub" }, "Click a booking to find it below")),
@@ -401,9 +417,9 @@ const STATUS = { ok: "On track", warn: "Check", bad: "Conflict" };
 function schedule(d) {
   const rows = d.appointments.map((a, i) => h("tr", { class: "row", "data-i": i },
     h("td", { class: "t num" }, a.time + " – " + a.end),
-    h("td", {}, h("span", { class: "who" }, a.patient), h("span", { class: "tr" }, a.treatment + (a.notes ? " · " + a.notes : ""))),
+    h("td", {}, h("span", { class: "who" }, a.patient), h("span", { class: "tr" }, (a.moved_from ? "Moved from " + a.moved_from + " · " : "") + a.treatment + (a.notes ? " · " + a.notes : ""))),
     h("td", {}, h("span", { class: "st " + a.status }, h("i"), STATUS[a.status])),
-    h("td", {}, h("button", { class: "copy", onclick: () => copyText(a.confirmation, `Message for ${a.patient.split(" ")[0]} copied`), "aria-label": `Copy confirmation message for ${a.patient}` }, "Copy message"))));
+    h("td", {}, h("button", { class: "copy", onclick: () => copyText(a.confirmation, `Message for ${a.patient.split(" ")[0]} copied`), "aria-label": `Copy message for ${a.patient}` }, a.moved_from ? "Copy new time" : "Copy message"))));
   return h("div", { class: "sec" },
     h("div", { class: "sec-h" }, h("h2", {}, "Schedule"), h("span", { class: "sub" }, plural(d.appointments.length, "booking"))),
     h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Time", "Patient", "Status", ""].map(c => h("th", {}, c)))), h("tbody", {}, rows))));
@@ -420,7 +436,25 @@ function issues(d) {
     items.length ? h("div", {}, items) : h("div", { class: "allclear" }, "All clear.", h("small", {}, "Nothing to fix on this day.")));
 }
 
-function dayView(d, r) { return h("div", {}, kpis(r.totals, d.stats), timeline(d, r), h("div", { class: "cols" }, schedule(d), issues(d))); }
+function fixes(d, r) {
+  const f = d.fix;
+  if (!f.moves.length && !f.unplaced.length) return null;
+  const rows = f.moves.map(m => h("div", { class: "fixrow" },
+    h("div", {}, h("span", { class: "who" }, m.patient), h("span", { class: "tr" }, m.treatment)),
+    h("div", { class: "mv num" }, m.old, " → ", h("b", {}, m.new)),
+    h("div", { class: "shift num" }, Math.abs(m.shift_min) + " min " + (m.shift_min < 0 ? "earlier" : "later"))));
+  const summary = `${plural(f.moves.length, "booking")} moved · ${f.conflicts_before} scheduling ${f.conflicts_before === 1 ? "conflict" : "conflicts"} → ${f.conflicts_after}`;
+  return h("div", { class: "sec" },
+    h("div", { class: "sec-h" }, h("h2", {}, r.autofix ? "Fixes applied" : "Suggested fixes"), h("span", { class: "sub" }, "Fewest possible moves, each to the nearest free slot")),
+    h("div", { class: "fixes" }, rows),
+    f.unplaced.length ? h("p", { class: "applied", style: "margin-top:16px;color:var(--warn)" }, `${plural(f.unplaced.length, "booking")} can’t fit inside open hours — call ${f.unplaced.map(u => u.patient).join(", ")}.`) : null,
+    h("div", { class: "fixbar" },
+      r.autofix
+        ? [h("p", {}, summary + ". Reschedule messages are ready to copy below."), h("button", { class: "tl-link", onclick: () => { S.autofix = false; analyse(); } }, "Revert to original")]
+        : [pill("Apply fixes", () => { S.autofix = true; analyse(); }), h("p", {}, summary + " if applied.")]));
+}
+
+function dayView(d, r) { return h("div", {}, kpis(r.totals, d.stats), timeline(d, r), fixes(d, r), h("div", { class: "cols" }, schedule(d), issues(d))); }
 
 function render() {
   nav();
@@ -448,7 +482,8 @@ addEventListener("drop", e => {
 });
 render();
 const q = new URLSearchParams(location.search);   // ?sample=day|week[&view=overview|0..4] for demos
-if (q.get("sample")) loadSample(q.get("sample") === "week" ? "week" : "day").then(() => { if (q.get("view") && S.result) { S.view = q.get("view"); render(); } });
+if (q.get("autofix")) S.autofix = true;
+if (q.get("sample")) loadSample(q.get("sample") === "week" ? "week" : "day", { autofix: !!q.get("autofix") }).then(() => { if (q.get("view") && S.result) { S.view = q.get("view"); render(); } });
 </script>
 </body>
 </html>

@@ -14,7 +14,8 @@ import html
 import io
 import json
 import sys
-from dataclasses import asdict, dataclass
+from bisect import bisect_right
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from itertools import groupby
 from pathlib import Path
@@ -33,6 +34,7 @@ class Appointment:
     phone: str
     notes: str = ""
     date: str = ""  # YYYY-MM-DD when the CSV carries a date column (week mode)
+    moved_from: str = ""  # original HH:MM when the rescheduler moved this booking
 
     @property
     def start(self) -> datetime:
@@ -259,6 +261,120 @@ def utilisation(appts: Iterable[Appointment], hours: tuple[datetime, datetime]) 
         return 0.0
     booked = sum(a.duration_min for a in appts)
     return round(100.0 * booked / window_min, 1)
+
+
+@dataclass
+class Move:
+    patient: str
+    treatment: str
+    old: str
+    new: str
+    shift_min: int
+
+
+CONFLICT_KINDS = {"overlap", "gap", "double_booked_patient"}
+SLOT_STEP_MIN = 5
+
+
+def _keep_set(appts: list[Appointment], min_gap_min: int) -> set[int]:
+    """Largest set of bookings that need no change (weighted interval scheduling).
+
+    Every kept pair is separated by at least ``min_gap_min`` so neither overlaps
+    nor tight turnarounds survive. Sorting by end time lets ``bisect`` find, for
+    each booking, the latest booking it can follow: O(n log n) overall. Weights
+    make count dominate, then total booked minutes break ties.
+    """
+    order = sorted(range(len(appts)), key=lambda i: (appts[i].end, appts[i].start))
+    ends = [appts[i].end for i in order]
+    gap = timedelta(minutes=min_gap_min)
+    prev: list[int] = []
+    for i in order:
+        # last booking (in end order) finishing early enough to precede this one
+        prev.append(bisect_right(ends, appts[i].start - gap) - 1)
+    weight = [10_000 + appts[i].duration_min for i in order]
+    best = [0] * (len(order) + 1)
+    take = [False] * len(order)
+    for k in range(len(order)):
+        with_k = weight[k] + best[prev[k] + 1]
+        take[k] = with_k > best[k]
+        best[k + 1] = max(best[k], with_k)
+    kept: set[int] = set()
+    k = len(order) - 1
+    while k >= 0:
+        if take[k]:
+            kept.add(order[k])
+            k = prev[k]
+        else:
+            k -= 1
+    return kept
+
+
+def resolve_day(
+    appts: list[Appointment],
+    hours: tuple[datetime, datetime],
+    min_gap_min: int = 10,
+) -> tuple[list[Appointment], list[Move], list[Appointment]]:
+    """Fix overlaps, tight gaps and double-bookings with as few moves as possible.
+
+    1. Keep the maximum set of bookings that already coexist legally.
+    2. Re-place each displaced booking at the free start time (5-minute grid,
+       inside opening hours) closest to where it was.
+    Returns (schedule after fixes, moves made, bookings that could not be placed).
+    """
+    kept = _keep_set(appts, min_gap_min)
+    gap = timedelta(minutes=min_gap_min)
+    placed = [a for i, a in enumerate(appts) if i in kept]
+    moves: list[Move] = []
+    unplaced: list[Appointment] = []
+    open_dt, close_dt = hours
+    for i in sorted((i for i in range(len(appts)) if i not in kept), key=lambda i: appts[i].start):
+        a = appts[i]
+        span = timedelta(minutes=a.duration_min)
+        slots = []
+        t = open_dt
+        while t + span <= close_dt:
+            slots.append(t)
+            t += timedelta(minutes=SLOT_STEP_MIN)
+        slots.sort(key=lambda t: (abs((t - a.start).total_seconds()), t))
+        chosen = next(
+            (
+                t
+                for t in slots
+                if all(t >= o.end + gap or t + span <= o.start - gap for o in placed)
+            ),
+            None,
+        )
+        if chosen is None:
+            unplaced.append(a)
+            placed.append(a)  # leave it where it is so the rest stay consistent
+            continue
+        moved = replace(a, time=chosen.strftime(TIME_FMT), moved_from=a.time)
+        placed.append(moved)
+        moves.append(
+            Move(
+                patient=a.patient,
+                treatment=a.treatment,
+                old=a.time,
+                new=moved.time,
+                shift_min=int((chosen - a.start).total_seconds() // 60),
+            )
+        )
+    fixed = sorted(placed, key=lambda a: a.start)
+    return fixed, moves, unplaced
+
+
+def conflict_count(appts: list[Appointment], min_gap_min: int = 10) -> int:
+    """How many overlap / tight-gap / double-booking flags a schedule trips."""
+    return sum(1 for i in analyse(appts, min_gap_min=min_gap_min) if i.kind in CONFLICT_KINDS)
+
+
+def reschedule_text(clinic: str, day: str, appt: Appointment) -> str:
+    return (
+        f"Hi {appt.patient.split()[0]}, this is {clinic}. We need to move your "
+        f"{appt.treatment} on {day} from {appt.moved_from} to {appt.time} "
+        f"(about {appt.duration_min} min). Reply YES to confirm the new time or "
+        "call us to pick another."
+    )
 
 
 def confirmation_text(clinic: str, day: str, appt: Appointment) -> str:

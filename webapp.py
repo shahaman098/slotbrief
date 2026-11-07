@@ -6,6 +6,7 @@ the machine. All analysis goes through the same functions the CLI uses.
 
 from __future__ import annotations
 
+import csv
 import io
 import json
 import webbrowser
@@ -65,8 +66,19 @@ def analyse_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     rows = _read_files(list(payload.get("files") or []), day)
     rows.sort(key=lambda a: (a.date, a.start))
+    autofix = bool(payload.get("autofix"))
     days = []
-    for label, appts in sb.group_by_day(rows):
+    final_groups = []
+    for label, original in sb.group_by_day(rows):
+        fixed, moves, unplaced = sb.resolve_day(original, hours, min_gap)
+        fix = {
+            "moves": [asdict(m) for m in moves],
+            "unplaced": [{"patient": a.patient, "time": a.time} for a in unplaced],
+            "conflicts_before": sb.conflict_count(original, min_gap),
+            "conflicts_after": sb.conflict_count(fixed, min_gap),
+        }
+        appts = fixed if autofix else original
+        final_groups.append((label, appts))
         issues = sb.analyse(appts, min_gap_min=min_gap)
         marks = sb._classify(appts, issues)
         days.append(
@@ -78,7 +90,11 @@ def analyse_payload(payload: dict[str, Any]) -> dict[str, Any]:
                         **asdict(a),
                         "end": a.end_label,
                         "status": marks.get(id(a), "ok"),
-                        "confirmation": sb.confirmation_text(clinic, label, a),
+                        "confirmation": (
+                            sb.reschedule_text(clinic, label, a)
+                            if a.moved_from
+                            else sb.confirmation_text(clinic, label, a)
+                        ),
                     }
                     for a in appts
                 ],
@@ -91,6 +107,7 @@ def analyse_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     "flags": len(issues),
                     "utilisation_pct": sb.utilisation(appts, hours),
                 },
+                "fix": fix,
             }
         )
     all_issues = [i for d in days for i in d["issues"]]
@@ -100,6 +117,7 @@ def analyse_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "mode": "week" if len(days) > 1 else "day",
         "hours": {"open": hours[0].strftime(sb.TIME_FMT), "close": hours[1].strftime(sb.TIME_FMT)},
         "min_gap": min_gap,
+        "autofix": autofix,
         "days": days,
         "totals": {
             "days": len(days),
@@ -111,11 +129,20 @@ def analyse_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 sum(d["stats"]["utilisation_pct"] for d in days) / len(days), 1
             ),
         },
-        "ics": sb._ics_calendar(
-            clinic,
-            [(label, appts) for label, appts in sb.group_by_day(rows)],
-        ),
+        "ics": sb._ics_calendar(clinic, final_groups),
+        "csv": _schedule_csv(final_groups),
     }
+
+
+def _schedule_csv(groups: list[tuple[str, list[sb.Appointment]]]) -> str:
+    """The schedule as it stands (after fixes, if applied), ready to re-import."""
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(["date", "time", "duration_min", "patient", "treatment", "phone", "notes"])
+    for label, appts in groups:
+        for a in appts:
+            writer.writerow([label, a.time, a.duration_min, a.patient, a.treatment, a.phone, a.notes])
+    return out.getvalue()
 
 
 def sample_payload(kind: str) -> dict[str, Any]:
