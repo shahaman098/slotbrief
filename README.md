@@ -8,7 +8,7 @@ Built solo for [Next Byte Hacks V5](https://next-byte-hacks-v5.devpost.com) (7 N
 
 ## Why
 
-Small clinics often live in a spreadsheet and a WhatsApp thread. Double-bookings and "can you remind them?" messages eat the morning. SlotBrief turns that CSV into:
+When a clinic booking changes, the patient often never hears about it. A slot moves, nobody messages them, and they turn up at the wrong time. The schedule lives in a spreadsheet and a WhatsApp thread, and telling the affected patient is a separate manual job. SlotBrief closes that communication gap: it finds the clashes, fixes them with the fewest moves, and drafts the message for everyone affected. It turns that CSV into:
 
 1. A **today board** (schedule + flags)
 2. Ready-to-send **confirmation drafts**
