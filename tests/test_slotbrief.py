@@ -6,12 +6,22 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from slotbrief import Appointment, analyse, ics_text, load_appointments  # noqa: E402
+from slotbrief import (  # noqa: E402
+    Appointment,
+    analyse,
+    group_by_day,
+    ics_text,
+    load_appointments,
+    load_week,
+    parse_hours,
+    utilisation,
+)
 
 
 class SlotBriefTests(unittest.TestCase):
@@ -156,6 +166,137 @@ class IcsTests(unittest.TestCase):
     @staticmethod
     def _unfold(text: str) -> str:
         return text.replace("\r\n ", "")
+
+
+class WeekTests(unittest.TestCase):
+    """--week mode: grouping, per-day flag isolation, aggregation, artifacts."""
+
+    WEEK = ROOT / "samples" / "week"
+    DAYS = ["2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06"]
+
+    def test_week_directory_groups_by_dated_filename(self) -> None:
+        rows = load_week(self.WEEK)
+        groups = group_by_day(rows)
+        self.assertEqual([day for day, _ in groups], self.DAYS)
+        self.assertEqual([len(appts) for _, appts in groups], [5, 5, 5, 4, 7])
+        # Each day's appointments arrive in start order.
+        for _, appts in groups:
+            times = [a.time for a in appts]
+            self.assertEqual(times, sorted(times))
+
+    def test_flags_never_leak_across_day_boundaries(self) -> None:
+        rows = load_week(self.WEEK)
+        groups = group_by_day(rows)
+        per_day_kinds = [{i.kind for i in analyse(appts)} for _, appts in groups]
+        # Seeded demo data: exactly one flagged day per flag type, boundaries clean.
+        self.assertEqual(per_day_kinds[0], set())  # Mon: clean
+        self.assertEqual(per_day_kinds[1], {"gap", "overlap"})  # Tue
+        self.assertEqual(per_day_kinds[2], {"gap"})  # Wed
+        self.assertEqual(per_day_kinds[3], {"late_start"})  # Thu
+        self.assertEqual(per_day_kinds[4], set())  # Fri: clean but busiest
+        total = sum(len(analyse(appts)) for _, appts in groups)
+        self.assertEqual(total, 4)
+        # Ungrouped, the same rows would be compared as one 1900 timeline and
+        # every day boundary would look like a double-booking.
+        self.assertGreater(len(analyse(rows)), total)
+
+    def test_week_requires_dates(self) -> None:
+        with self.assertRaises(SystemExit):
+            load_week(ROOT / "samples" / "day.csv")  # no date column, not a directory
+
+    def test_utilisation_is_share_of_open_hours(self) -> None:
+        hours = parse_hours("09:00-18:00")  # 540 minutes
+        full = [Appointment("09:00", 540, "Amira Khan", "Consultation", "5551")]
+        self.assertEqual(utilisation(full, hours), 100.0)
+        self.assertEqual(utilisation([], hours), 0.0)
+        half = [Appointment("09:00", 270, "Amira Khan", "Consultation", "5551")]
+        self.assertEqual(utilisation(half, hours), 50.0)
+        # Double-booked chairs push above 100% rather than being capped.
+        over = [Appointment("09:00", 600, "Amira Khan", "Consultation", "5551")]
+        self.assertGreater(utilisation(over, hours), 100.0)
+
+    def test_parse_hours_rejects_garbage(self) -> None:
+        for spec in ("9am-5pm", "18:00-09:00", "09:00"):
+            with self.subTest(spec=spec), self.assertRaises(SystemExit):
+                parse_hours(spec)
+
+    def test_week_cli_writes_week_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "slotbrief.py"),
+                    str(self.WEEK),
+                    "--week",
+                    "--clinic",
+                    "Boto Demo Clinic",
+                    "--out",
+                    str(out),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("week 2026-11-02 → 2026-11-06", proc.stdout)
+            self.assertIn("bookings: 26", proc.stdout)
+
+            report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(report["days"]), 5)
+            self.assertEqual(report["range"], {"start": "2026-11-02", "end": "2026-11-06"})
+            totals = report["totals"]
+            self.assertEqual(totals["bookings"], sum(d["stats"]["bookings"] for d in report["days"]))
+            self.assertEqual(
+                totals["chair_minutes"], sum(d["stats"]["chair_minutes"] for d in report["days"])
+            )
+            self.assertEqual(totals["flags"], sum(d["stats"]["flags"] for d in report["days"]))
+            self.assertEqual(totals["busiest_day"], "2026-11-06")
+
+            board = (out / "week-board.html").read_text(encoding="utf-8")
+            for day in self.DAYS:
+                # Day sections are labelled with the localised date.
+                label = datetime.strptime(day, "%Y-%m-%d").strftime("%d %b %Y")
+                self.assertIn(label, board)
+            self.assertIn("Week board", board)
+
+            # read_bytes keeps the CRLF line endings ICS requires.
+            calendar = (out / "week.ics").read_bytes().decode("utf-8")
+            self.assertEqual(calendar.count("BEGIN:VEVENT"), 26)
+            dtstart_days = {
+                line[len("DTSTART:") : len("DTSTART:") + 8]
+                for line in calendar.split("\r\n")
+                if line.startswith("DTSTART:")
+            }
+            self.assertEqual(dtstart_days, {"20261102", "20261103", "20261104", "20261105", "20261106"})
+
+            confirmations = (out / "confirmations.txt").read_text(encoding="utf-8")
+            for day in self.DAYS:
+                self.assertIn(f"[{day}]", confirmations)
+
+    def test_single_day_mode_still_uses_day_report_shape(self) -> None:
+        """--week off must keep the original report/board contract intact."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "slotbrief.py"),
+                    str(ROOT / "samples" / "day.csv"),
+                    "--day",
+                    "2026-11-07",
+                    "--out",
+                    str(out),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+            self.assertIn("stats", report)
+            self.assertNotIn("days", report)
+            self.assertTrue((out / "today-board.html").exists())
+            self.assertTrue((out / "day.ics").exists())
+            self.assertFalse((out / "week-board.html").exists())
 
 
 if __name__ == "__main__":
