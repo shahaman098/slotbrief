@@ -14,7 +14,7 @@ import html
 import json
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from itertools import groupby
 from pathlib import Path
 from typing import Iterable
@@ -310,7 +310,7 @@ def _ics_calendar(clinic: str, groups: list[tuple[str, list[Appointment]]]) -> s
             event = [
                 "BEGIN:VEVENT",
                 f"UID:{uid}@slotbrief",
-                f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}",
+                f"DTSTAMP:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
                 f"DTSTART:{start.strftime('%Y%m%dT%H%M%S')}",
                 f"DTEND:{end.strftime('%Y%m%dT%H%M%S')}",
                 f"SUMMARY:{_ics_escape(f'{a.treatment} - {a.patient}')}",
@@ -453,7 +453,8 @@ def render_board(
       font-family: ui-sans-serif, system-ui, sans-serif;
       font-size: 0.92rem;
     }}
-    li.overlap, li.late_start {{ border-left-color: var(--bad); }}
+    li.overlap, li.double_booked_patient {{ border-left-color: var(--bad); }}
+    li.late_start, li.bad_phone {{ border-left-color: var(--warn); }}
     li.gap {{ border-left-color: var(--warn); }}
     li.ok {{ border-left-color: var(--accent); }}
     .stat {{
@@ -596,7 +597,8 @@ WEEK_CSS = """
       font-family: ui-sans-serif, system-ui, sans-serif;
       font-size: 0.88rem;
     }
-    li.overlap { border-left-color: var(--bad); }
+    li.overlap, li.double_booked_patient { border-left-color: var(--bad); }
+    li.bad_phone { border-left-color: var(--warn); }
     li.gap { border-left-color: var(--warn); }
     li.late_start { border-left-color: var(--warn); }
     li.ok { border-left-color: var(--accent); color: #166534; }
@@ -632,7 +634,7 @@ def render_week_board(
             f"""
     <section>
       <h2>{html.escape(label)}</h2>
-      <p class="daystats">{len(appts)} bookings · {sum(a.duration_min for a in appts)} chair-minutes · {utilisation(appts, hours)}% of open hours · {len(issues)} flags</p>
+      <p class="daystats">{len(appts)} bookings · {sum(a.duration_min for a in appts)} chair-minutes · {utilisation(appts, hours)}% of open hours · {len(issues)} {'flag' if len(issues) == 1 else 'flags'}</p>
       <table>
         <thead>
           <tr>

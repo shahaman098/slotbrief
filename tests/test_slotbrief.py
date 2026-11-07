@@ -374,5 +374,16 @@ class SmartFlagTests(unittest.TestCase):
         self.assertNotIn("double_booked_patient", proc.stdout)
 
 
+class AllFlagsSampleTests(unittest.TestCase):
+    def test_demo_all_flags_sample_trips_every_flag_kind(self) -> None:
+        from slotbrief import analyse, load_appointments
+
+        issues = analyse(load_appointments(ROOT / "samples" / "demo-all-flags.csv"))
+        self.assertEqual(
+            {i.kind for i in issues},
+            {"overlap", "gap", "late_start", "double_booked_patient", "bad_phone"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

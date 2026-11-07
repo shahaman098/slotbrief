@@ -18,7 +18,7 @@ Small clinics often live in a spreadsheet and a WhatsApp thread. Double-bookings
 ## Quick start
 
 ```bash
-# one day — every flag firing in a single sample
+# one day (gap, overlap and late-start flags firing)
 python3 slotbrief.py samples/demo-day.csv \
   --clinic "Boto Demo Clinic" \
   --day 2026-11-07 \
@@ -29,6 +29,8 @@ python3 slotbrief.py --week samples/week/ \
   --clinic "Boto Demo Clinic" \
   --out out/week
 ```
+
+`samples/demo-all-flags.csv` trips all five flags at once (including double-booked patient and unusable phone number).
 
 Open `out/today-board.html` in a browser. Read `out/confirmations.txt`. Double-click `out/day.ics` to drop the day into your calendar. Inspect `out/report.json`.
 
@@ -68,7 +70,7 @@ Rows are grouped by date *before* analysis, so `analyse()` runs once per day: Fr
 python3 -m unittest discover -s tests -v
 ```
 
-24 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, and CLI round-trips for both modes.
+25 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, and CLI round-trips for both modes.
 
 ## Screenshots
 
