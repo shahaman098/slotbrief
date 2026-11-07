@@ -12,7 +12,8 @@ Small clinics often live in a spreadsheet and a WhatsApp thread. Double-bookings
 
 1. A **today board** (schedule + flags)
 2. Ready-to-send **confirmation drafts**
-3. A machine-readable **report.json** for later tooling
+3. An **`day.ics` calendar file** (RFC 5545) you can import into Apple Calendar / Google Calendar
+4. A machine-readable **report.json** for later tooling
 
 ## Quick start
 
@@ -23,7 +24,7 @@ python3 slotbrief.py samples/day.csv \
   --out out
 ```
 
-Open `out/today-board.html` in a browser. Read `out/confirmations.txt`. Inspect `out/report.json`.
+Open `out/today-board.html` in a browser. Read `out/confirmations.txt`. Double-click `out/day.ics` to drop the day into your calendar. Inspect `out/report.json`.
 
 ## CSV columns
 
@@ -59,7 +60,6 @@ See `screenshots/` for the CLI summary and the generated today board.
 
 ## What I would add next
 
-- ICS export for the day
 - Google Sheets / Notion import
 - Opt-in SMS send through a clinic's own provider (never store credentials in-repo)
 - Hook into Boto's live booking calendar

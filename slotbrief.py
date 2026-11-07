@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import html
 import json
 import sys
@@ -125,6 +126,65 @@ def confirmation_text(clinic: str, day: str, appt: Appointment) -> str:
         f"on {day} at {appt.time} (about {appt.duration_min} min). "
         f"Reply YES to confirm or call us if you need to reschedule.{note}"
     )
+
+
+def _ics_escape(text: str) -> str:
+    """Escape per RFC 5545 §3.3.11 (backslash, semicolon, comma, newline)."""
+    return (
+        text.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+
+
+def _ics_fold(line: str) -> list[str]:
+    """Fold long content lines at 74 octets (RFC 5545 §3.1)."""
+    if len(line) <= 75:
+        return [line]
+    parts, current = [], ""
+    for ch in line:
+        if len(current) >= 74:
+            parts.append(current)
+            current = " " + ch
+        else:
+            current += ch
+    parts.append(current)
+    return parts
+
+
+def ics_text(clinic: str, day: str, appts: list[Appointment]) -> str:
+    """Render the day as an RFC 5545 VCALENDAR the front desk can import."""
+    day_date = datetime.strptime(day, DATE_FMT).date()
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        f"PRODID:-//SlotBrief//{clinic}//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+    ]
+    for a in appts:
+        start = datetime.combine(day_date, a.start.time())
+        end = start + timedelta(minutes=a.duration_min)
+        uid = hashlib.sha1(
+            f"{day}|{a.time}|{a.patient}|{a.treatment}".encode("utf-8")
+        ).hexdigest()[:16]
+        event = [
+            "BEGIN:VEVENT",
+            f"UID:{uid}@slotbrief",
+            f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}",
+            f"DTSTART:{start.strftime('%Y%m%dT%H%M%S')}",
+            f"DTEND:{end.strftime('%Y%m%dT%H%M%S')}",
+            f"SUMMARY:{_ics_escape(f'{a.treatment} - {a.patient}')}",
+            f"DESCRIPTION:{_ics_escape(a.notes)}",
+            f"LOCATION:{_ics_escape(clinic)}",
+            "END:VEVENT",
+        ]
+        for raw in event:
+            lines.extend(_ics_fold(raw))
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines) + "\r\n"
 
 
 def render_board(
@@ -299,11 +359,13 @@ def write_outputs(
     out_dir.mkdir(parents=True, exist_ok=True)
     board = out_dir / "today-board.html"
     confirmations = out_dir / "confirmations.txt"
+    calendar = out_dir / "day.ics"
     report = out_dir / "report.json"
 
     board.write_text(render_board(clinic, day, appts, issues), encoding="utf-8")
     lines = [confirmation_text(clinic, day, a) for a in appts]
     confirmations.write_text("\n\n".join(lines) + "\n", encoding="utf-8")
+    calendar.write_text(ics_text(clinic, day, appts), encoding="utf-8")
     report.write_text(
         json.dumps(
             {
@@ -322,7 +384,7 @@ def write_outputs(
         + "\n",
         encoding="utf-8",
     )
-    return {"board": board, "confirmations": confirmations, "report": report}
+    return {"board": board, "confirmations": confirmations, "calendar": calendar, "report": report}
 
 
 def print_summary(
