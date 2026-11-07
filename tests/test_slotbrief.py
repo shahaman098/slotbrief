@@ -385,5 +385,70 @@ class AllFlagsSampleTests(unittest.TestCase):
         )
 
 
+class WebAppTests(unittest.TestCase):
+    """The local web app: payload analysis plus a real HTTP round-trip."""
+
+    def test_sample_day_payload_marks_conflicts_and_builds_ics(self) -> None:
+        import webapp
+
+        result = webapp.analyse_payload(webapp.sample_payload("day"))
+        self.assertEqual(result["mode"], "day")
+        day = result["days"][0]
+        statuses = {a["patient"] + a["time"]: a["status"] for a in day["appointments"]}
+        self.assertEqual(statuses["Jordan Lee12:05"], "bad")
+        self.assertEqual(statuses["Jordan Lee12:55"], "bad")
+        self.assertEqual(statuses["Sam Okonkwo16:05"], "ok")
+        self.assertEqual(result["ics"].count("BEGIN:VEVENT"), 6)
+        self.assertIn("Reply YES", day["appointments"][0]["confirmation"])
+
+    def test_week_payload_groups_files_by_filename_date(self) -> None:
+        import webapp
+
+        result = webapp.analyse_payload(webapp.sample_payload("week"))
+        self.assertEqual(result["mode"], "week")
+        self.assertEqual(result["totals"]["bookings"], 26)
+        self.assertEqual(result["totals"]["busiest_day"], "2026-11-06")
+        self.assertEqual([d["day"] for d in result["days"]][0], "2026-11-02")
+
+    def test_bad_input_raises_input_error_not_a_crash(self) -> None:
+        import webapp
+
+        with self.assertRaises(webapp.InputError):
+            webapp.analyse_payload({"files": []})
+        with self.assertRaises(webapp.InputError):
+            webapp.analyse_payload({"files": [{"name": "a.csv", "text": "time\n09:00\n"}]})
+        with self.assertRaises(webapp.InputError):
+            webapp.analyse_payload({"files": [{"name": "a.csv", "text": "x"}], "hours": "late"})
+
+    def test_http_round_trip_and_error_status(self) -> None:
+        import threading
+        import urllib.error
+        import urllib.request
+
+        import webapp
+
+        server = webapp.make_server(port=0)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{port}"
+            page = urllib.request.urlopen(base + "/").read().decode("utf-8")
+            self.assertIn("SlotBrief", page)
+            sample = json.loads(urllib.request.urlopen(base + "/api/sample?kind=day").read())
+            req = urllib.request.Request(
+                base + "/api/analyse", data=json.dumps(sample).encode(), method="POST"
+            )
+            result = json.loads(urllib.request.urlopen(req).read())
+            self.assertEqual(result["totals"]["flags"], 6)
+            bad = urllib.request.Request(base + "/api/analyse", data=b"{}", method="POST")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(bad)
+            self.assertEqual(ctx.exception.code, 400)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()

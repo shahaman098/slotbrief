@@ -17,6 +17,16 @@ Small clinics often live in a spreadsheet and a WhatsApp thread. Double-bookings
 
 ## Quick start
 
+**Web app** (recommended) — drag-and-drop CSV, interactive chair timeline, week view, one-click copy for each confirmation text, calendar and report export, light/dark themes:
+
+```bash
+python3 slotbrief.py --serve        # opens http://127.0.0.1:8765
+```
+
+It binds to `127.0.0.1` only, so nothing you load leaves the machine. Try **Load sample day / week** on the start screen, or deep-link `http://127.0.0.1:8765/?sample=week&view=overview`.
+
+**Command line** — the same engine, writing files:
+
 ```bash
 # one day (gap, overlap and late-start flags firing)
 python3 slotbrief.py samples/demo-day.csv \
@@ -70,9 +80,18 @@ Rows are grouped by date *before* analysis, so `analyse()` runs once per day: Fr
 python3 -m unittest discover -s tests -v
 ```
 
-25 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, and CLI round-trips for both modes.
+29 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, CLI round-trips for both modes, and the web app's API (including a live HTTP round-trip).
 
 ## Screenshots
+
+Web app:
+
+- `screenshots/07-app-day-view.png` — day view: KPIs, chair timeline with conflicts highlighted, schedule, needs-attention list
+- `screenshots/08-app-week-overview.png` — week overview with per-day utilisation and flags
+- `screenshots/09-app-week-day.png` — a single day in week mode
+- `screenshots/06-app-empty-state.png` — start screen
+
+CLI / static boards:
 
 - `screenshots/01-cli-summary.png` — day run with all three flags firing and the calendar export listed
 - `screenshots/02-today-board.png` — the generated today board
@@ -83,7 +102,8 @@ python3 -m unittest discover -s tests -v
 ## Stack
 
 - Python 3.9+ standard library only (`argparse`, `csv`, `json`, `html`, `datetime`, `dataclasses`, `hashlib`, `itertools`)
-- Static HTML/CSS for the boards, RFC 5545 for the calendar
+- `http.server` + a dependency-free single-page UI (`web/index.html`, vanilla JS/CSS, responsive, dark mode, keyboard-accessible) served locally
+- Static HTML/CSS boards for the CLI, RFC 5545 for the calendar
 
 ## What I would add next
 

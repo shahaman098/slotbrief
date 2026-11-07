@@ -11,13 +11,14 @@ import argparse
 import csv
 import hashlib
 import html
+import io
 import json
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from itertools import groupby
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, TextIO
 
 TIME_FMT = "%H:%M"
 DATE_FMT = "%Y-%m-%d"
@@ -54,37 +55,42 @@ class Issue:
 
 
 def load_appointments(path: Path) -> list[Appointment]:
-    rows: list[Appointment] = []
     with path.open(newline="", encoding="utf-8") as fh:
-        reader = csv.DictReader(fh)
-        required = {"time", "duration_min", "patient", "treatment", "phone"}
-        if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
-            missing = sorted(required - set(reader.fieldnames or []))
-            raise SystemExit(f"CSV missing columns: {', '.join(missing)}")
-        for i, row in enumerate(reader, start=2):
-            if not any((row.get(k) or "").strip() for k in reader.fieldnames):
-                continue
+        return parse_appointments(fh)
+
+
+def parse_appointments(fh: TextIO) -> list[Appointment]:
+    """Parse appointment rows from any open CSV text stream."""
+    rows: list[Appointment] = []
+    reader = csv.DictReader(fh)
+    required = {"time", "duration_min", "patient", "treatment", "phone"}
+    if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
+        missing = sorted(required - set(reader.fieldnames or []))
+        raise SystemExit(f"CSV missing columns: {', '.join(missing)}")
+    for i, row in enumerate(reader, start=2):
+        if not any((row.get(k) or "").strip() for k in reader.fieldnames):
+            continue
+        try:
+            duration = int(str(row["duration_min"]).strip())
+        except ValueError as exc:
+            raise SystemExit(f"Line {i}: duration_min must be an integer") from exc
+        date_value = str(row.get("date") or "").strip()
+        if date_value:
             try:
-                duration = int(str(row["duration_min"]).strip())
+                datetime.strptime(date_value, DATE_FMT)
             except ValueError as exc:
-                raise SystemExit(f"Line {i}: duration_min must be an integer") from exc
-            date_value = str(row.get("date") or "").strip()
-            if date_value:
-                try:
-                    datetime.strptime(date_value, DATE_FMT)
-                except ValueError as exc:
-                    raise SystemExit(f"Line {i}: date must be YYYY-MM-DD") from exc
-            rows.append(
-                Appointment(
-                    time=str(row["time"]).strip(),
-                    duration_min=duration,
-                    patient=str(row["patient"]).strip(),
-                    treatment=str(row["treatment"]).strip(),
-                    phone=str(row["phone"]).strip(),
-                    notes=str(row.get("notes") or "").strip(),
-                    date=date_value,
-                )
+                raise SystemExit(f"Line {i}: date must be YYYY-MM-DD") from exc
+        rows.append(
+            Appointment(
+                time=str(row["time"]).strip(),
+                duration_min=duration,
+                patient=str(row["patient"]).strip(),
+                treatment=str(row["treatment"]).strip(),
+                phone=str(row["phone"]).strip(),
+                notes=str(row.get("notes") or "").strip(),
+                date=date_value,
             )
+        )
     rows.sort(key=lambda a: (a.date, a.start))
     return rows
 
@@ -334,12 +340,37 @@ def ics_week_text(clinic: str, groups: list[tuple[str, list[Appointment]]]) -> s
     return _ics_calendar(clinic, groups)
 
 
-def _schedule_rows(appts: Iterable[Appointment]) -> str:
+def _classify(appts: list[Appointment], issues: Iterable[Issue]) -> dict[int, str]:
+    """Map id(appointment) -> 'bad' (time conflict) or 'warn' (worth a look).
+
+    Conflicts come from the geometry itself, so two bookings for the same
+    patient are each marked rather than guessed from names.
+    """
+    marks: dict[int, str] = {}
+    for i, left in enumerate(appts):
+        for right in appts[i + 1 :]:
+            if left.start < right.end and right.start < left.end:
+                marks[id(left)] = marks[id(right)] = "bad"
+    warn_names = {
+        name
+        for issue in issues
+        if issue.kind in {"gap", "late_start", "bad_phone"}
+        for name in issue.related
+    }
+    for a in appts:
+        if a.patient in warn_names:
+            marks.setdefault(id(a), "warn")
+    return marks
+
+
+def _schedule_rows(appts: Iterable[Appointment], marks: dict[int, str] | None = None) -> str:
     """Table rows shared by the day board and the week board."""
+    marks = marks or {}
     rows = []
     for a in appts:
+        cls = marks.get(id(a), "")
         rows.append(
-            "<tr>"
+            f"<tr class='{cls}'>"
             f"<td>{html.escape(a.time)}</td>"
             f"<td>{html.escape(a.end_label)}</td>"
             f"<td>{html.escape(a.patient)}</td>"
@@ -351,12 +382,147 @@ def _schedule_rows(appts: Iterable[Appointment]) -> str:
     return "".join(rows)
 
 
+KIND_LABELS = {
+    "overlap": "Overlap",
+    "gap": "Tight gap",
+    "late_start": "Late start",
+    "double_booked_patient": "Double-booked",
+    "bad_phone": "Bad number",
+}
+
+
 def _issue_items(issues: Iterable[Issue]) -> str:
     issue_list = list(issues)
     return (
-        "".join(f"<li class='{html.escape(i.kind)}'>{html.escape(i.message)}</li>" for i in issue_list)
+        "".join(
+            f"<li class='{html.escape(i.kind)}'>"
+            f"<span class='tag'>{html.escape(KIND_LABELS.get(i.kind, i.kind))}</span>"
+            f"{html.escape(i.message)}</li>"
+            for i in issue_list
+        )
         or "<li class='ok'>No schedule conflicts detected.</li>"
     )
+
+
+def _timeline(
+    appts: list[Appointment],
+    issues: Iterable[Issue],
+    window: tuple[datetime, datetime] | None = None,
+) -> str:
+    """A chair-time strip: one bar per booking, stacked into lanes when they collide."""
+    if not appts:
+        return ""
+    marks = _classify(appts, issues)
+    lo = min(a.start for a in appts)
+    hi = max(a.end for a in appts)
+    if window:
+        lo, hi = min(lo, window[0]), max(hi, window[1])
+    lo = lo.replace(minute=0, second=0)
+    if hi.minute or hi.second:
+        hi = hi.replace(minute=0, second=0) + timedelta(hours=1)
+    total = (hi - lo).total_seconds() / 60
+
+    lane_ends: list[datetime] = []
+    placed: list[tuple[Appointment, int]] = []
+    for a in sorted(appts, key=lambda x: x.start):
+        for lane, ends in enumerate(lane_ends):
+            if ends <= a.start:
+                lane_ends[lane] = a.end
+                break
+        else:
+            lane = len(lane_ends)
+            lane_ends.append(a.end)
+        placed.append((a, lane))
+
+    ticks = []
+    hour = lo
+    while hour <= hi:
+        left = (hour - lo).total_seconds() / 60 / total * 100
+        ticks.append(f"<i class='tick' style='left:{left:.2f}%'><span>{hour.strftime('%H')}</span></i>")
+        hour += timedelta(hours=1)
+
+    bars = []
+    for a, lane in placed:
+        left = (a.start - lo).total_seconds() / 60 / total * 100
+        width = a.duration_min / total * 100
+        cls = marks.get(id(a), "ok")
+        tip = f"{a.patient} · {a.treatment} · {a.time}-{a.end_label}"
+        bars.append(
+            f"<div class='bar {cls}' style='left:{left:.2f}%;width:{width:.2f}%;top:{lane * 44}px' "
+            f"title='{html.escape(tip, quote=True)}'>"
+            f"<b>{html.escape(a.patient)}</b><small>{html.escape(a.time)}</small></div>"
+        )
+    height = len(lane_ends) * 44 + 4
+    return (
+        "<div class='timeline'>"
+        f"<div class='lanes' style='height:{height}px'>{''.join(ticks)}{''.join(bars)}</div>"
+        "<div class='legend'><span class='k ok'></span>ok"
+        "<span class='k warn'></span>worth a look"
+        "<span class='k bad'></span>time conflict</div>"
+        "</div>"
+    )
+
+
+TIMELINE_CSS = """
+    .timeline { margin-bottom: 1.5rem; }
+    .lanes {
+      position: relative;
+      margin: 1.4rem 0 0.4rem;
+      border-top: 1px solid var(--line);
+    }
+    .tick {
+      position: absolute; top: 0; bottom: 0; width: 0;
+      border-left: 1px dashed var(--line);
+    }
+    .tick span {
+      position: absolute; top: -1.2rem; left: -0.6rem;
+      font: 0.7rem ui-sans-serif, system-ui, sans-serif; color: #78716c;
+    }
+    .bar {
+      position: absolute; height: 40px; overflow: hidden;
+      padding: 3px 7px; border-radius: 6px; border: 1px solid #5eada5;
+      background: #d3ece8; color: #134e4a;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      display: flex; flex-direction: column; justify-content: center;
+      white-space: nowrap; text-overflow: ellipsis;
+    }
+    .bar b { font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; }
+    .bar small { font-size: 0.68rem; opacity: 0.75; }
+    .bar.warn { background: #fde7c4; border-color: var(--warn); color: #78350f; }
+    .bar.bad { background: #fbd0d0; border-color: var(--bad); color: #7f1d1d; box-shadow: 0 0 0 2px rgba(185,28,28,0.18); }
+    .legend {
+      font: 0.74rem ui-sans-serif, system-ui, sans-serif; color: #57534e;
+    }
+    .legend .k {
+      display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 2px;
+      margin: 0 0.3rem 0 0.9rem; vertical-align: -1px; border: 1px solid;
+    }
+    .legend .k:first-child { margin-left: 0; }
+    .k.ok { background: #d3ece8; border-color: #5eada5; }
+    .k.warn { background: #fde7c4; border-color: var(--warn); }
+    .k.bad { background: #fbd0d0; border-color: var(--bad); }
+    .tablewrap { overflow-x: auto; }
+    tr.bad td:first-child { box-shadow: inset 4px 0 0 var(--bad); }
+    tr.bad td { background: #fff1f1; }
+    tr.warn td:first-child { box-shadow: inset 4px 0 0 var(--warn); }
+    tr.warn td { background: #fffaf0; }
+    .tag {
+      display: inline-block; margin-right: 0.6rem; padding: 0.05rem 0.45rem;
+      font-size: 0.68rem; font-weight: 700; letter-spacing: 0.05em;
+      text-transform: uppercase; border-radius: 3px; background: #e7e5e4; color: #44403c;
+    }
+    li.overlap .tag, li.double_booked_patient .tag { background: #fbd0d0; color: #7f1d1d; }
+    li.gap .tag, li.late_start .tag, li.bad_phone .tag { background: #fde7c4; color: #78350f; }
+    .utilbar {
+      height: 6px; border-radius: 3px; background: #e7e5e4; margin: 0 0 0.9rem; overflow: hidden;
+    }
+    .utilbar i { display: block; height: 100%; background: var(--accent); }
+    .utilbar i.over { background: var(--bad); }
+    @media print {
+      body { background: #fff; padding: 0; }
+      .bar, .tag, tr.bad td, tr.warn td { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    }
+"""
 
 
 def render_board(
@@ -365,8 +531,9 @@ def render_board(
     appts: list[Appointment],
     issues: list[Issue],
 ) -> str:
-    rows_html = _schedule_rows(appts)
+    rows_html = _schedule_rows(appts, _classify(appts, issues))
     issue_items = _issue_items(issues)
+    timeline_html = _timeline(appts, issues)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -472,6 +639,7 @@ def render_board(
       font-family: ui-sans-serif, system-ui, sans-serif;
       font-size: 0.8rem;
     }}
+{TIMELINE_CSS}
   </style>
 </head>
 <body>
@@ -484,8 +652,12 @@ def render_board(
       <span class="stat">{len(issues)} flags</span>
     </section>
     <section>
+      <h2>Chair timeline</h2>
+      {timeline_html}
+    </section>
+    <section>
       <h2>Schedule</h2>
-      <table>
+      <div class="tablewrap"><table>
         <thead>
           <tr>
             <th>Start</th><th>End</th><th>Patient</th>
@@ -495,7 +667,7 @@ def render_board(
         <tbody>
           {rows_html}
         </tbody>
-      </table>
+      </table></div>
     </section>
     <section>
       <h2>Front-desk flags</h2>
@@ -630,12 +802,17 @@ def render_week_board(
     sections = []
     for day, appts, issues in days:
         label = datetime.strptime(day, DATE_FMT).strftime("%a %d %b %Y")
+        util = utilisation(appts, hours)
+        bar_cls = "over" if util > 100 else ""
+        flag_word = "flag" if len(issues) == 1 else "flags"
         sections.append(
             f"""
     <section>
       <h2>{html.escape(label)}</h2>
-      <p class="daystats">{len(appts)} bookings · {sum(a.duration_min for a in appts)} chair-minutes · {utilisation(appts, hours)}% of open hours · {len(issues)} {'flag' if len(issues) == 1 else 'flags'}</p>
-      <table>
+      <p class="daystats">{len(appts)} bookings · {sum(a.duration_min for a in appts)} chair-minutes · {util}% of open hours · {len(issues)} {flag_word}</p>
+      <div class="utilbar"><i class="{bar_cls}" style="width:{min(util, 100)}%"></i></div>
+      {_timeline(appts, issues, window=hours)}
+      <div class="tablewrap"><table>
         <thead>
           <tr>
             <th>Start</th><th>End</th><th>Patient</th>
@@ -643,9 +820,9 @@ def render_week_board(
           </tr>
         </thead>
         <tbody>
-          {_schedule_rows(appts)}
+          {_schedule_rows(appts, _classify(appts, issues))}
         </tbody>
-      </table>
+      </table></div>
       <ul>{_issue_items(issues)}</ul>
     </section>"""
         )
@@ -657,7 +834,7 @@ def render_week_board(
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{html.escape(clinic)} — week of {html.escape(days[0][0])}</title>
   <style>
-{WEEK_CSS}
+{WEEK_CSS}{TIMELINE_CSS}
   </style>
 </head>
 <body>
@@ -839,7 +1016,12 @@ def build_parser() -> argparse.ArgumentParser:
         prog="slotbrief",
         description="Generate a clinic today-board and patient confirmation drafts.",
     )
-    p.add_argument("csv", type=Path, help="Appointments CSV for one day, or a week with --week")
+    p.add_argument(
+        "csv",
+        type=Path,
+        nargs="?",
+        help="Appointments CSV for one day, or a week with --week (not needed with --serve)",
+    )
     p.add_argument("--clinic", default="Indie Clinic", help="Clinic display name")
     p.add_argument("--day", default="", help="ISO date shown on the board (YYYY-MM-DD)")
     p.add_argument("--out", type=Path, default=Path("out"), help="Output directory")
@@ -863,11 +1045,25 @@ def build_parser() -> argparse.ArgumentParser:
         default="09:00-18:00",
         help="Open window used for utilisation %% in week mode (default 09:00-18:00)",
     )
+    p.add_argument(
+        "--serve",
+        action="store_true",
+        help="Run the local web app (drag-and-drop CSV, interactive boards) instead of writing files",
+    )
+    p.add_argument("--port", type=int, default=8765, help="Port for --serve (default 8765)")
+    p.add_argument("--no-open", action="store_true", help="With --serve, don't open a browser tab")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.serve:
+        import webapp
+
+        return webapp.serve(args.port, open_browser=not args.no_open)
+    if args.csv is None:
+        parser.error("a CSV path is required (or use --serve for the web app)")
     day = args.day or datetime.now().strftime(DATE_FMT)
     if args.week:
         rows = load_week(args.csv)
