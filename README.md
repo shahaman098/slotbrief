@@ -53,6 +53,8 @@ For `--week`, pass either one CSV with a `date` column or a directory of files n
 - **overlap** — next booking starts before the current one ends
 - **gap** — turnaround shorter than `--min-gap` (default 10 minutes)
 - **late_start** — first booking is at/after 11:00 (morning capacity unused)
+- **double_booked_patient** — the same patient holds two slots that overlap (a confirmation for either one would be a lie)
+- **bad_phone** — a number too short or containing letters, so the drafted SMS could not be sent anyway
 
 Week mode additionally reports **utilisation**: booked chair-minutes as a share of the `--hours` open window (default `09:00-18:00`). It is deliberately uncapped — over 100% means the chairs are double-booked.
 
@@ -66,7 +68,7 @@ Rows are grouped by date *before* analysis, so `analyse()` runs once per day: Fr
 python3 -m unittest discover -s tests -v
 ```
 
-18 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, and CLI round-trips for both modes.
+24 tests covering flag logic, RFC 5545 escaping/folding/UIDs, week grouping and aggregation, and CLI round-trips for both modes.
 
 ## Screenshots
 

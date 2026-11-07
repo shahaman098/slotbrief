@@ -299,5 +299,80 @@ class WeekTests(unittest.TestCase):
             self.assertFalse((out / "week-board.html").exists())
 
 
+class SmartFlagTests(unittest.TestCase):
+    """bad_phone and double_booked_patient: the 'a confirmation would be a lie' flags."""
+
+    @staticmethod
+    def _phone_day(phone: str) -> list:
+        return [
+            Appointment("09:00", 45, "Amira Khan", "Consultation", phone),
+            Appointment("10:00", 30, "Jordan Lee", "Botox", "+447700900302"),
+        ]
+
+    def test_bad_phone_fires_on_short_numbers_letters_and_empty(self) -> None:
+        for phone in ("5551", "call me", ""):
+            with self.subTest(phone=phone):
+                issues = analyse(self._phone_day(phone))
+                bad = [i for i in issues if i.kind == "bad_phone"]
+                self.assertEqual(len(bad), 1, f"expected bad_phone for {phone!r}")
+                self.assertIn("cannot be sent", bad[0].message)
+
+    def test_bad_phone_accepts_real_mobile_numbers(self) -> None:
+        for phone in ("+447700900301", "07700 900301", "+1 (555) 010-2934"):
+            with self.subTest(phone=phone):
+                kinds = {i.kind for i in analyse(self._phone_day(phone))}
+                self.assertNotIn("bad_phone", kinds)
+
+    def test_double_booked_patient_fires_even_with_a_third_party_between(self) -> None:
+        appts = [
+            Appointment("09:00", 90, "Amira Khan", "Peel", "+447700900301"),
+            Appointment("09:30", 30, "Jordan Lee", "Botox", "+447700900302"),
+            Appointment("10:00", 45, "Amira Khan", "Review", "+447700900301"),
+        ]
+        kinds = {i.kind for i in analyse(appts)}
+        self.assertIn("double_booked_patient", kinds)
+        messages = [i.message for i in analyse(appts) if i.kind == "double_booked_patient"]
+        self.assertIn("Amira Khan is booked twice at once (09:00-10:30 and 10:00)", messages[0])
+
+    def test_same_patient_twice_same_day_without_overlap_is_fine(self) -> None:
+        appts = [
+            Appointment("09:40", 45, "Amira Khan", "Consultation", "+447700900301"),
+            Appointment("15:40", 45, "Amira Khan", "Review", "+447700900301"),
+        ]
+        self.assertNotIn("double_booked_patient", {i.kind for i in analyse(appts)})
+
+    def test_samples_never_trigger_the_smart_flags(self) -> None:
+        day = analyse(load_appointments(ROOT / "samples" / "day.csv"))
+        self.assertLessEqual(
+            {i.kind for i in day}, {"overlap", "gap", "late_start"},
+            "samples/day.csv must keep its original three flag kinds",
+        )
+        for day_file in sorted((ROOT / "samples" / "week").glob("*.csv")):
+            kinds = {i.kind for i in analyse(load_appointments(day_file))}
+            self.assertLessEqual(kinds, {"overlap", "gap", "late_start"}, day_file.name)
+
+    def test_demo_day_cli_still_reports_exactly_three_flags(self) -> None:
+        """The demo video narrates 'three flags' — this pins that claim to CI."""
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "slotbrief.py"),
+                str(ROOT / "samples" / "demo-day.csv"),
+                "--day",
+                "2026-11-07",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),  # default --out out lands in the repo (gitignored)
+        )
+        self.assertIn("flags: 3", proc.stdout)
+        self.assertIn("[gap]", proc.stdout)
+        self.assertIn("[overlap]", proc.stdout)
+        self.assertIn("[late_start]", proc.stdout)
+        self.assertNotIn("bad_phone", proc.stdout)
+        self.assertNotIn("double_booked_patient", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

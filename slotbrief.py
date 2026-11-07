@@ -48,7 +48,7 @@ class Appointment:
 
 @dataclass
 class Issue:
-    kind: str  # overlap | gap | late_start
+    kind: str  # overlap | gap | late_start | double_booked_patient | bad_phone
     message: str
     related: list[str]
 
@@ -182,6 +182,51 @@ def analyse(appts: list[Appointment], min_gap_min: int = 10) -> list[Issue]:
                 related=[appts[0].patient],
             )
         )
+    issues.extend(_patient_collisions(appts))
+    issues.extend(_bad_phones(appts))
+    return issues
+
+
+def _patient_collisions(appts: list[Appointment]) -> list[Issue]:
+    """Same patient holding two slots that overlap — a confirmation would lie."""
+    issues: list[Issue] = []
+    by_patient: dict[str, list[Appointment]] = {}
+    for a in appts:
+        by_patient.setdefault(a.patient, []).append(a)
+    for patient, slots in by_patient.items():
+        own = sorted(slots, key=lambda s: s.start)
+        for left, right in zip(own, own[1:]):
+            if right.start < left.end:
+                issues.append(
+                    Issue(
+                        kind="double_booked_patient",
+                        message=(
+                            f"{patient} is booked twice at once "
+                            f"({left.time}-{left.end_label} and {right.time})"
+                        ),
+                        related=[patient],
+                    )
+                )
+    return issues
+
+
+def _bad_phones(appts: list[Appointment]) -> list[Issue]:
+    """Numbers that cannot receive the drafted SMS (too short, or letters in them)."""
+    issues: list[Issue] = []
+    for a in appts:
+        digits = sum(ch.isdigit() for ch in a.phone)
+        if digits < 10 or any(ch.isalpha() for ch in a.phone):
+            shown = a.phone or "no number"
+            issues.append(
+                Issue(
+                    kind="bad_phone",
+                    message=(
+                        f"{a.patient} has an unusable number ({shown}); "
+                        "confirmation SMS cannot be sent"
+                    ),
+                    related=[a.patient],
+                )
+            )
     return issues
 
 
