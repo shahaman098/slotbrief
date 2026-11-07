@@ -134,6 +134,71 @@ def analyse_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def fit_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Where can one more booking go on a given day, and who would have to move?"""
+    clinic = str(payload.get("clinic") or "Indie Clinic").strip()[:80] or "Indie Clinic"
+    try:
+        duration = int(payload.get("duration", 45))
+        min_gap = int(payload.get("min_gap", 10))
+    except (TypeError, ValueError) as exc:
+        raise InputError("Duration and minimum gap must be whole numbers.") from exc
+    if not 5 <= duration <= 480:
+        raise InputError("Duration must be between 5 and 480 minutes.")
+    if not 0 <= min_gap <= 240:
+        raise InputError("Minimum gap must be between 0 and 240 minutes.")
+    prefer = str(payload.get("prefer") or "").strip()
+    if prefer:
+        try:
+            datetime.strptime(prefer, sb.TIME_FMT)
+        except ValueError as exc:
+            raise InputError("Preferred time must look like HH:MM.") from exc
+    try:
+        hours = sb.parse_hours(str(payload.get("hours") or "09:00-18:00"))
+    except SystemExit as exc:
+        raise InputError(str(exc.code)) from exc
+    treatment = str(payload.get("treatment") or "Walk-in").strip()[:60] or "Walk-in"
+    default_day = str(payload.get("day") or datetime.now().strftime(sb.DATE_FMT))
+    rows = _read_files(list(payload.get("files") or []), default_day)
+    rows.sort(key=lambda a: (a.date, a.start))
+    groups = dict(sb.group_by_day(rows))
+    label = str(payload.get("for_day") or next(iter(groups)))
+    if label not in groups:
+        raise InputError(f"No schedule loaded for {label}.")
+    options = sb.find_fit(
+        groups[label], hours, duration, min_gap, prefer=prefer, treatment=treatment
+    )
+    _, base_moves, _ = sb.resolve_day(groups[label], hours, min_gap)
+    return {
+        "day": label,
+        "duration": duration,
+        "treatment": treatment,
+        "base_moves": len(base_moves),
+        "options": [
+            {
+                "time": o.time,
+                "end": o.end,
+                "free_from": o.free_from,
+                "free_to": o.free_to,
+                "disruption_min": o.disruption_min,
+                "moves": [
+                    {
+                        **asdict(m),
+                        "message": sb.reschedule_text(
+                            clinic,
+                            label,
+                            sb.Appointment(
+                                m.new, m.duration_min, m.patient, m.treatment, "", moved_from=m.old
+                            ),
+                        ),
+                    }
+                    for m in o.moves
+                ],
+            }
+            for o in options
+        ],
+    }
+
+
 def _schedule_csv(groups: list[tuple[str, list[sb.Appointment]]]) -> str:
     """The schedule as it stands (after fixes, if applied), ready to re-import."""
     out = io.StringIO()
@@ -189,7 +254,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "Not found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/api/analyse":
+        handlers = {"/api/analyse": analyse_payload, "/api/fit": fit_payload}
+        handler = handlers.get(self.path)
+        if handler is None:
             self._json(404, {"error": "Not found"})
             return
         length = int(self.headers.get("Content-Length") or 0)
@@ -200,7 +267,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(payload, dict):
                 raise InputError("Request body must be a JSON object.")
-            self._json(200, analyse_payload(payload))
+            self._json(200, handler(payload))
         except (InputError, json.JSONDecodeError) as exc:
             self._json(400, {"error": str(exc)})
 

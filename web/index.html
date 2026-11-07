@@ -179,6 +179,18 @@ tr.row.hl { background: rgba(255,255,255,.07); }
 .mvd { color: var(--fg-2); }
 @media (max-width: 720px) { .fixrow { grid-template-columns: 1fr; gap: 4px; } .fixrow .shift { text-align: left; } }
 
+/* fit finder */
+.fitform { display: flex; flex-wrap: wrap; gap: 22px 28px; align-items: flex-end; margin-bottom: 28px; }
+.fitrow { display: grid; grid-template-columns: minmax(160px, 1.1fr) 1.6fr auto; gap: 20px; align-items: baseline; padding: 18px 0; border-bottom: 1px solid var(--line); }
+.fitrow .when { font: 400 22px/1.2 var(--serif); font-variant-numeric: tabular-nums; }
+.fitrow .tag { display: block; color: var(--fg-3); font-size: 13px; margin-top: 3px; }
+.fitrow .tag.free { color: var(--ok, var(--fg-2)); }
+.fitrow .who { color: var(--fg-2); }
+.fitrow .who b { color: var(--fg); font-weight: 500; }
+.fitrow .who div + div { margin-top: 6px; }
+.fitrow .cp { text-align: right; white-space: nowrap; }
+@media (max-width: 720px) { .fitrow { grid-template-columns: 1fr; gap: 4px; } .fitrow .cp { text-align: left; } }
+
 /* overview */
 .ov { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); border-top: 1px solid var(--line); }
 .ovc { text-align: left; padding: 26px 24px 30px 0; border-bottom: 1px solid var(--line); }
@@ -236,7 +248,7 @@ const ARROW = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" strok
 const MARK = '<svg width="22" height="20" viewBox="0 0 22 20" fill="currentColor"><rect x="0" y="0" width="14" height="5" rx="1.5"/><rect x="5" y="7.5" width="17" height="5" rx="1.5"/><rect x="0" y="15" width="11" height="5" rx="1.5"/></svg>';
 const pill = (label, onclick, cls = "") => h("button", { class: "pillbtn " + cls, onclick }, label, h("span", { class: "go", html: ARROW }));
 
-const S = { files: [], opts: { clinic: "Indie Clinic", hours: "09:00-18:00", min_gap: 10 }, result: null, view: "0", error: "", autofix: false };
+const S = { files: [], opts: { clinic: "Indie Clinic", hours: "09:00-18:00", min_gap: 10 }, result: null, view: "0", error: "", autofix: false, fit: { duration: 45, treatment: "Walk-in", prefer: "", options: null, day: "" } };
 
 function toast(msg) {
   const t = $("#toast"); t.textContent = msg; t.classList.add("show");
@@ -253,7 +265,7 @@ function download(name, text, type) {
 }
 
 async function analyse() {
-  S.error = "";
+  S.error = ""; S.fit.options = null;
   try {
     const res = await fetch("/api/analyse", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ files: S.files, ...S.opts, autofix: S.autofix }) });
     const data = await res.json();
@@ -454,7 +466,39 @@ function fixes(d, r) {
         : [pill("Apply fixes", () => { S.autofix = true; analyse(); }), h("p", {}, summary + " if applied.")]));
 }
 
-function dayView(d, r) { return h("div", {}, kpis(r.totals, d.stats), timeline(d, r), fixes(d, r), h("div", { class: "cols" }, schedule(d), issues(d))); }
+
+function fitPanel(d, r) {
+  const F = S.fit;
+  const field = (label, key, type, extra) => h("label", { class: "opt" }, label,
+    h("input", { type, value: F[key], ...extra, onchange: e => { F[key] = type === "number" ? Number(e.target.value) : e.target.value.trim(); F.options = null; } }));
+  const find = async () => {
+    try {
+      const res = await fetch("/api/fit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ files: S.files, ...S.opts, for_day: d.day, duration: F.duration, treatment: F.treatment, prefer: F.prefer }) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Something went wrong.");
+      F.options = data; F.day = d.day; render();
+    } catch (e) { toast(e.message); }
+  };
+  const res = F.options && F.day === d.day ? F.options : null;
+  const rows = res ? res.options.map(o => h("div", { class: "fitrow" },
+    h("div", {}, h("span", { class: "when" }, o.time + "–" + o.end),
+      h("span", { class: "tag" + (o.moves.length ? "" : " free") }, o.moves.length ? plural(o.moves.length, "booking") + " moves · " + o.disruption_min + " min of shifting" : "Nobody moves")),
+    o.moves.length
+      ? h("div", { class: "who" }, o.moves.map(m => h("div", {}, h("b", {}, m.patient), " ", m.old, " → ", h("b", {}, m.new))))
+      : h("div", { class: "who" }, o.free_from === o.free_to ? "Only this start works." : `Any start from ${o.free_from} to ${o.free_to} works.`),
+    h("div", { class: "cp" }, o.moves.length ? h("button", { class: "tl-link", onclick: () => copyText(o.moves.map(m => m.message).join("\n\n"), "Reschedule text copied") }, "Copy message" + (o.moves.length > 1 ? "s" : "")) : null))) : [];
+  return h("div", { class: "sec" },
+    h("div", { class: "sec-h" }, h("h2", {}, "Fit someone in"), h("span", { class: "sub" }, "Ranked by who has to move, then by how far")),
+    h("div", { class: "fitform" },
+      field("Minutes", "duration", "number", { min: 5, max: 480, step: 5, class: "num" }),
+      field("Treatment", "treatment", "text"),
+      field("Prefers (HH:MM)", "prefer", "text", { placeholder: "any time" }),
+      pill("Find a slot", find)),
+    res && !res.options.length ? h("div", { class: "allclear" }, "Nowhere today.", h("small", {}, "Even moving everyone who can move, a " + res.duration + "-minute booking doesn’t fit.")) : h("div", { class: "fixes" }, rows),
+    res && res.base_moves ? h("p", { class: "applied", style: "margin-top:16px" }, "Judged on the day after its existing conflicts are fixed, so each option’s cost is only what the new booking adds.") : null);
+}
+
+function dayView(d, r) { return h("div", {}, kpis(r.totals, d.stats), timeline(d, r), fixes(d, r), fitPanel(d, r), h("div", { class: "cols" }, schedule(d), issues(d))); }
 
 function render() {
   nav();

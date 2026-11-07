@@ -270,19 +270,26 @@ class Move:
     old: str
     new: str
     shift_min: int
+    duration_min: int = 0
 
 
 CONFLICT_KINDS = {"overlap", "gap", "double_booked_patient"}
 SLOT_STEP_MIN = 5
 
 
-def _keep_set(appts: list[Appointment], min_gap_min: int) -> set[int]:
+PIN_WEIGHT = 10**9
+
+
+def _keep_set(
+    appts: list[Appointment], min_gap_min: int, pinned: frozenset[int] | set[int] = frozenset()
+) -> set[int]:
     """Largest set of bookings that need no change (weighted interval scheduling).
 
     Every kept pair is separated by at least ``min_gap_min`` so neither overlaps
     nor tight turnarounds survive. Sorting by end time lets ``bisect`` find, for
     each booking, the latest booking it can follow: O(n log n) overall. Weights
-    make count dominate, then total booked minutes break ties.
+    make count dominate, then total booked minutes break ties. Pinned bookings
+    (indices into ``appts``) outweigh everything else, so they are never displaced.
     """
     order = sorted(range(len(appts)), key=lambda i: (appts[i].end, appts[i].start))
     ends = [appts[i].end for i in order]
@@ -291,7 +298,7 @@ def _keep_set(appts: list[Appointment], min_gap_min: int) -> set[int]:
     for i in order:
         # last booking (in end order) finishing early enough to precede this one
         prev.append(bisect_right(ends, appts[i].start - gap) - 1)
-    weight = [10_000 + appts[i].duration_min for i in order]
+    weight = [10_000 + appts[i].duration_min + (PIN_WEIGHT if i in pinned else 0) for i in order]
     best = [0] * (len(order) + 1)
     take = [False] * len(order)
     for k in range(len(order)):
@@ -313,15 +320,17 @@ def resolve_day(
     appts: list[Appointment],
     hours: tuple[datetime, datetime],
     min_gap_min: int = 10,
+    pinned: frozenset[int] | set[int] = frozenset(),
 ) -> tuple[list[Appointment], list[Move], list[Appointment]]:
     """Fix overlaps, tight gaps and double-bookings with as few moves as possible.
 
     1. Keep the maximum set of bookings that already coexist legally.
     2. Re-place each displaced booking at the free start time (5-minute grid,
        inside opening hours) closest to where it was.
+    ``pinned`` holds indices of bookings that must not move (used by ``find_fit``).
     Returns (schedule after fixes, moves made, bookings that could not be placed).
     """
-    kept = _keep_set(appts, min_gap_min)
+    kept = _keep_set(appts, min_gap_min, pinned)
     gap = timedelta(minutes=min_gap_min)
     placed = [a for i, a in enumerate(appts) if i in kept]
     moves: list[Move] = []
@@ -348,7 +357,7 @@ def resolve_day(
             unplaced.append(a)
             placed.append(a)  # leave it where it is so the rest stay consistent
             continue
-        moved = replace(a, time=chosen.strftime(TIME_FMT), moved_from=a.time)
+        moved = replace(a, time=chosen.strftime(TIME_FMT), moved_from=a.moved_from or a.time)
         placed.append(moved)
         moves.append(
             Move(
@@ -357,10 +366,92 @@ def resolve_day(
                 old=a.time,
                 new=moved.time,
                 shift_min=int((chosen - a.start).total_seconds() // 60),
+                duration_min=a.duration_min,
             )
         )
     fixed = sorted(placed, key=lambda a: a.start)
     return fixed, moves, unplaced
+
+
+@dataclass
+class FitOption:
+    """One way to squeeze an extra booking into the day."""
+
+    time: str  # recommended start
+    end: str
+    moves: list[Move]  # existing bookings that must shift to make room (empty = free)
+    free_from: str = ""  # for free options: earliest start in the same contiguous free window
+    free_to: str = ""  # ... and the latest
+
+    @property
+    def disruption_min(self) -> int:
+        return sum(abs(m.shift_min) for m in self.moves)
+
+
+def find_fit(
+    appts: list[Appointment],
+    hours: tuple[datetime, datetime],
+    duration_min: int,
+    min_gap_min: int = 10,
+    prefer: str = "",
+    limit: int = 4,
+    treatment: str = "Walk-in",
+    patient: str = "New patient",
+) -> list[FitOption]:
+    """Where can one more booking go, and who has to budge for it?
+
+    Tries every start on the 5-minute grid. For each, the new booking is pinned and
+    the same minimal-move solver re-places whatever it displaces, so every option is
+    a complete conflict-free day. Options are ranked by (people moved, total minutes
+    shifted, distance from ``prefer``). Starts that move nobody are collapsed into
+    free windows. The existing schedule is first fixed with ``resolve_day`` so the
+    cost of an option is only what the new booking causes.
+    """
+    base, _, _ = resolve_day(appts, hours, min_gap_min)
+    open_dt, close_dt = hours
+    span = timedelta(minutes=duration_min)
+    pref = datetime.strptime(prefer, TIME_FMT) if prefer else None
+    free: list[datetime] = []
+    tried: dict[tuple, tuple[datetime, list[Move]]] = {}
+    t = open_dt
+    while t + span <= close_dt:
+        new = Appointment(
+            time=t.strftime(TIME_FMT), duration_min=duration_min, patient=patient, treatment=treatment, phone=""
+        )
+        trial = base + [new]
+        _, moves, unplaced = resolve_day(trial, hours, min_gap_min, pinned={len(trial) - 1})
+        if not unplaced:
+            if not moves:
+                free.append(t)
+            else:
+                sig = tuple((m.patient, m.old, m.new) for m in moves)
+                cost = (len(moves), sum(abs(m.shift_min) for m in moves))
+                dist = abs((t - pref).total_seconds()) if pref else 0
+                best = tried.get(sig)
+                if best is None or dist < best[2]:
+                    tried[sig] = (t, moves, dist, cost)
+        t += timedelta(minutes=SLOT_STEP_MIN)
+
+    def fmt(d: datetime) -> str:
+        return d.strftime(TIME_FMT)
+
+    options: list[tuple[tuple, FitOption]] = []
+    step = timedelta(minutes=SLOT_STEP_MIN)
+    run: list[datetime] = []
+    for d in free + [None]:  # type: ignore[list-item]
+        if run and (d is None or d - run[-1] != step):
+            pick = min(run, key=lambda x: (abs((x - pref).total_seconds()) if pref else 0, x))
+            dist = abs((pick - pref).total_seconds()) if pref else 0
+            opt = FitOption(fmt(pick), fmt(pick + span), [], fmt(run[0]), fmt(run[-1]))
+            options.append(((0, 0, dist, pick), opt))
+            run = []
+        if d is not None:
+            run.append(d)
+    for start, moves, dist, cost in tried.values():
+        opt = FitOption(fmt(start), fmt(start + span), moves)
+        options.append(((cost[0], cost[1], dist, start), opt))
+    options.sort(key=lambda kv: kv[0])
+    return [o for _, o in options[:limit]]
 
 
 def conflict_count(appts: list[Appointment], min_gap_min: int = 10) -> int:
@@ -1127,6 +1218,27 @@ def print_week_summary(
         print(f"    - {key}: {path}")
 
 
+def print_fit(clinic: str, day: str, appts: list[Appointment], args: argparse.Namespace) -> None:
+    hours = parse_hours(args.hours)
+    options = find_fit(
+        appts, hours, args.fit, args.min_gap, prefer=args.prefer, treatment=args.treatment
+    )
+    print(f"{clinic} · {day} · where can a {args.fit}-minute {args.treatment} go?")
+    _, base_moves, _ = resolve_day(appts, hours, args.min_gap)
+    if base_moves:
+        print(f"  (judged on the day after its {len(base_moves)} existing conflict fix(es); see --serve > Suggested fixes)")
+    if not options:
+        print("  Nowhere: the day is full even after moving everyone who can move.")
+        return
+    for n, o in enumerate(options, 1):
+        if not o.moves:
+            window = f" (any start {o.free_from}-{o.free_to})" if o.free_from != o.free_to else ""
+            print(f"  {n}. {o.time}-{o.end}  free: nobody moves{window}")
+            continue
+        who = "; ".join(f"{m.patient} {m.old}->{m.new}" for m in o.moves)
+        print(f"  {n}. {o.time}-{o.end}  moves {len(o.moves)}: {who}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="slotbrief",
@@ -1161,6 +1273,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="09:00-18:00",
         help="Open window used for utilisation %% in week mode (default 09:00-18:00)",
     )
+    p.add_argument(
+        "--fit",
+        type=int,
+        metavar="MINUTES",
+        help="Where can one more booking of this length go, and who has to move? (single-day CSV)",
+    )
+    p.add_argument("--prefer", default="", help="With --fit, the time the patient would like (HH:MM)")
+    p.add_argument("--treatment", default="Walk-in", help="With --fit, the treatment name")
     p.add_argument(
         "--serve",
         action="store_true",
@@ -1198,6 +1318,9 @@ def main(argv: list[str] | None = None) -> int:
     if not appts:
         print("No appointments found in CSV.", file=sys.stderr)
         return 1
+    if args.fit:
+        print_fit(args.clinic, day, appts, args)
+        return 0
     issues = analyse(appts, min_gap_min=args.min_gap)
     paths = write_outputs(args.out, args.clinic, day, appts, issues)
     print_summary(args.clinic, day, appts, issues, paths)

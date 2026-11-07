@@ -83,6 +83,23 @@ Week mode additionally reports **utilisation**: booked chair-minutes as a share 
 
 Rows are grouped by date *before* analysis, so `analyse()` runs once per day: Friday 16:00 is never compared against Monday 09:00 as if they shared a timeline. Every day reuses the exact same flag logic as single-day mode, then totals, busiest day and utilisation roll up into `report.json`.
 
+## Performance
+
+The stdlib-only constraint is not a liability. `benchmarks/bench.py` generates
+deterministic synthetic loads and times the real pipeline stages (best of 3):
+
+| rows | days | CSV load | per-day flags | render + write | full CLI | peak mem |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 | 50 | 9 ms | 17 ms | 232 ms | **299 ms** | 4.3 MB |
+| 10,000 | 500 | 96 ms | 173 ms | 2.34 s | **2.65 s** | 43.8 MB |
+| 100,000 | 5,000 | 1.01 s | 1.79 s | 23.6 s | **27.2 s** | 437 MB |
+
+Measured on an Apple M4 Pro, Python 3.9.6. A thousand appointments — fifty busy
+clinic days — brief end-to-end in under a third of a second; even 100k rows
+(5,000 days) complete in under half a minute, with render+write dominated by
+serialising the generated HTML/ICS/JSON files. Reproduce with
+`python3 benchmarks/bench.py`.
+
 ## Tests
 
 ```bash

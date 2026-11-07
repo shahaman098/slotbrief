@@ -567,5 +567,154 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual(len(fixed), 3)
 
 
+class FitTests(unittest.TestCase):
+    """The fit finder: where can one more booking go, and who has to budge?"""
+
+    @staticmethod
+    def _hours():
+        from slotbrief import parse_hours
+
+        return parse_hours("09:00-18:00")
+
+    @staticmethod
+    def _appt(time, dur, name="P"):
+        return Appointment(time, dur, name, "Treatment", "+447400100001")
+
+    def _random_clean_day(self, rng):
+        from slotbrief import resolve_day
+
+        appts = [
+            self._appt(f"{9 + rng.randint(0, 7):02d}:{rng.choice(['00', '15', '30', '45'])}", rng.choice([30, 45, 60]), f"P{i}")
+            for i in range(rng.randint(1, 6))
+        ]
+        fixed, _, unplaced = resolve_day(appts, self._hours(), 10)
+        return None if unplaced else fixed
+
+    def test_free_windows_match_a_direct_scan_of_every_start(self) -> None:
+        import random
+        from datetime import timedelta
+
+        from slotbrief import conflict_count, find_fit
+
+        rng = random.Random(3)
+        hours = self._hours()
+        for _ in range(60):
+            base = self._random_clean_day(rng)
+            if base is None:
+                continue
+            dur = rng.choice([30, 45, 60])
+            expected = set()
+            t = hours[0]
+            while t + timedelta(minutes=dur) <= hours[1]:
+                trial = sorted(base + [self._appt(t.strftime("%H:%M"), dur, "NEW")], key=lambda a: a.start)
+                if conflict_count(trial) == 0:
+                    expected.add(t.strftime("%H:%M"))
+                t += timedelta(minutes=5)
+            got = set()
+            for o in find_fit(base, hours, dur, limit=1000):
+                if not o.moves:
+                    cur = datetime.strptime(o.free_from, "%H:%M")
+                    while cur <= datetime.strptime(o.free_to, "%H:%M"):
+                        got.add(cur.strftime("%H:%M"))
+                        cur += timedelta(minutes=5)
+            self.assertEqual(got, expected)
+
+    def test_displacement_count_matches_brute_force_minimum(self) -> None:
+        import itertools
+        import random
+
+        from slotbrief import resolve_day
+
+        rng = random.Random(21)
+        hours = self._hours()
+        for _ in range(200):
+            base = self._random_clean_day(rng)
+            if base is None:
+                continue
+            new = self._appt(f"{9 + rng.randint(0, 6):02d}:{rng.choice(['00', '20', '40'])}", rng.choice([30, 60]), "NEW")
+            trial = base + [new]
+            n = len(trial)
+
+            def compatible(group):
+                ordered = sorted(group, key=lambda a: a.start)
+                return all((b.start - a.end).total_seconds() / 60 >= 10 for a, b in zip(ordered, ordered[1:]))
+
+            best_keep = max(
+                len(c) for r in range(1, n + 1) for c in itertools.combinations(trial, r) if new in c and compatible(c)
+            )
+            _, moves, unplaced = resolve_day(trial, hours, 10, pinned={n - 1})
+            self.assertEqual(len(moves) + len(unplaced), n - best_keep)
+
+    def test_every_option_is_a_conflict_free_day_and_the_new_booking_never_moves(self) -> None:
+        import random
+
+        from slotbrief import conflict_count, find_fit, resolve_day
+
+        rng = random.Random(5)
+        hours = self._hours()
+        for _ in range(60):
+            base = self._random_clean_day(rng)
+            if base is None:
+                continue
+            for o in find_fit(base, hours, 45, prefer="12:00", limit=6):
+                day = [a for a in base]
+                moved = {(m.patient, m.old): m for m in o.moves}
+                day = [
+                    self._appt(moved[(a.patient, a.time)].new, a.duration_min, a.patient)
+                    if (a.patient, a.time) in moved
+                    else a
+                    for a in day
+                ] + [self._appt(o.time, 45, "NEW")]
+                day.sort(key=lambda a: a.start)
+                self.assertEqual(conflict_count(day), 0, o)
+                self.assertTrue(all(m.patient != "New patient" for m in o.moves))
+
+    def test_ranking_prefers_fewer_people_moved_then_less_shifting(self) -> None:
+        from slotbrief import find_fit, parse_hours
+
+        appts = [self._appt("09:00", 60, "A"), self._appt("10:10", 60, "B"), self._appt("11:20", 60, "C")]
+        options = find_fit(appts, parse_hours("09:00-12:30"), 60, limit=10)
+        keys = [(len(o.moves), o.disruption_min) for o in options]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_prefer_picks_the_closest_start_inside_a_free_window(self) -> None:
+        from slotbrief import find_fit
+
+        appts = [self._appt("09:00", 30, "A"), self._appt("16:00", 30, "B")]
+        opt = find_fit(appts, self._hours(), 30, prefer="13:00", limit=1)[0]
+        self.assertEqual(opt.moves, [])
+        self.assertEqual(opt.time, "13:00")
+        self.assertEqual((opt.free_from, opt.free_to), ("09:40", "15:20"))
+
+    def test_nothing_fits_when_the_treatment_outlasts_the_day(self) -> None:
+        from slotbrief import find_fit, parse_hours
+
+        self.assertEqual(find_fit([], parse_hours("09:00-10:00"), 90), [])
+
+    def test_web_fit_payload_returns_ranked_options_with_messages(self) -> None:
+        import webapp
+
+        payload = webapp.sample_payload("day")
+        out = webapp.fit_payload({**payload, "duration": 45, "prefer": "14:00", "treatment": "Hydrafacial"})
+        self.assertTrue(out["options"])
+        moving = [o for o in out["options"] if o["moves"]]
+        self.assertTrue(moving)
+        self.assertIn("We need to move your", moving[0]["moves"][0]["message"])
+        with self.assertRaises(webapp.InputError):
+            webapp.fit_payload({**payload, "duration": 2})
+        with self.assertRaises(webapp.InputError):
+            webapp.fit_payload({**payload, "prefer": "teatime"})
+
+    def test_cli_fit_lists_free_and_moving_options(self) -> None:
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "slotbrief.py"), str(ROOT / "samples" / "demo-day.csv"), "--fit", "45", "--prefer", "14:00"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn("free: nobody moves", proc.stdout)
+        self.assertIn("moves 1:", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
