@@ -17,7 +17,7 @@ Small clinics often live in a spreadsheet and a WhatsApp thread. Double-bookings
 
 ## Quick start
 
-**Web app** (recommended) — drag-and-drop CSV, interactive chair timeline, week view, one-click copy for each confirmation text, calendar and report export, light/dark themes:
+**Web app** (recommended) — drag-and-drop CSV, interactive chair timeline, week view, one-click copy for each confirmation text, calendar and report export, in a dark editorial interface:
 
 ```bash
 python3 slotbrief.py --serve        # opens http://127.0.0.1:8765
@@ -89,7 +89,7 @@ Web app:
 - `screenshots/07-app-day-view.png` — day view: KPIs, chair timeline with conflicts highlighted, schedule, needs-attention list
 - `screenshots/08-app-week-overview.png` — week overview with per-day utilisation and flags
 - `screenshots/09-app-week-day.png` — a single day in week mode
-- `screenshots/06-app-empty-state.png` — start screen
+- `screenshots/06-app-landing.png` — landing screen (the hero is the product drawn as line-art: a timeline with one collision)
 
 CLI / static boards:
 
@@ -102,7 +102,7 @@ CLI / static boards:
 ## Stack
 
 - Python 3.9+ standard library only (`argparse`, `csv`, `json`, `html`, `datetime`, `dataclasses`, `hashlib`, `itertools`)
-- `http.server` + a dependency-free single-page UI (`web/index.html`, vanilla JS/CSS, responsive, dark mode, keyboard-accessible) served locally
+- `http.server` + a dependency-free single-page UI (`web/index.html`, vanilla JS/CSS, responsive, keyboard-accessible, dark editorial design) served locally
 - Static HTML/CSS boards for the CLI, RFC 5545 for the calendar
 
 ## What I would add next
