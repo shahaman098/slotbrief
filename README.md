@@ -17,7 +17,7 @@ Small clinics often live in a spreadsheet and a WhatsApp thread. Double-bookings
 
 ## Quick start
 
-**Web app** (recommended) — drag-and-drop CSV, interactive chair timeline, week view, one-click copy for each confirmation text, calendar and report export, in a dark editorial interface:
+**Web app** (recommended) — drag-and-drop CSV, interactive chair timeline, week view, one-click copy for each confirmation text, calendar and report export, in an interface themed on the [Boto](https://boto.clinic) design system:
 
 ```bash
 python3 slotbrief.py --serve        # opens http://127.0.0.1:8765
@@ -141,7 +141,7 @@ Web app:
 - `screenshots/08-app-week-overview.png` — week overview with per-day utilisation and flags
 - `screenshots/09-app-week-day.png` — a single day in week mode
 - `screenshots/10-app-fixes-applied.png` — after Apply fixes: moved bookings marked, conflicts cleared
-- `screenshots/06-app-landing.png` — landing screen (the hero is the product drawn as line-art: a timeline with one collision)
+- `screenshots/06-app-landing.png` — landing screen (hero plus a product stage showing a real conflict and its fix)
 
 CLI / static boards:
 
@@ -154,7 +154,7 @@ CLI / static boards:
 ## Stack
 
 - Python 3.9+ standard library only (`argparse`, `csv`, `json`, `html`, `datetime`, `dataclasses`, `hashlib`, `itertools`)
-- `http.server` + a dependency-free single-page UI (`web/index.html`, vanilla JS/CSS, responsive, keyboard-accessible, dark editorial design) served locally
+- `http.server` + a dependency-free single-page UI (`web/index.html`, vanilla JS/CSS, responsive, keyboard-accessible, Boto-themed design) served locally
 - Static HTML/CSS boards for the CLI, RFC 5545 for the calendar
 
 ## What I would add next
